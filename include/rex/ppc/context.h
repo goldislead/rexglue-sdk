@@ -320,6 +320,12 @@ struct alignas(0x40) PPCContext {
   PPCFPSCRRegister fpscr;
   uint8_t vscr_sat = 0;  // VSCR saturation flag (for vector ops)
 
+  /// Last indirect call target address. Set by PPC_CALL_INDIRECT_FUNC before
+  /// dispatch. Used by the unloaded-module trap to report the faulting address.
+  /// Unconditional (not guarded by config flags) because ctr may be optimized
+  /// to a local variable via PPC_CONFIG_CTR_AS_LOCAL.
+  uint32_t last_indirect_target = 0;
+
 #if !defined(PPC_CONFIG_NON_ARGUMENT_AS_LOCAL) && !defined(REX_CONFIG_NON_ARGUMENT_AS_LOCAL)
   PPCRegister f0;
 #endif
