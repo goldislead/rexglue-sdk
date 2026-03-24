@@ -91,14 +91,20 @@
   (*(PPCFunc**)(x + REX_IMAGE_BASE + REX_IMAGE_SIZE + (u64(u32(y) - REX_CODE_BASE) * 2)))
 
 #ifdef REXGLUE_ENABLE_PROFILING
-#define REX_CALL_INDIRECT_FUNC(x)           \
-  PROFILE_FUNCTION_DISPATCHED();            \
-  ctx.last_indirect_target = (uint32_t)(x); \
-  REX_LOOKUP_FUNC(base, x)(ctx, base);
+#define REX_CALL_INDIRECT_FUNC(x)                            \
+  do {                                                       \
+    PROFILE_FUNCTION_DISPATCHED();                           \
+    uint32_t rex_indirect_target_ = (uint32_t)(x);           \
+    ctx.last_indirect_target = rex_indirect_target_;         \
+    REX_LOOKUP_FUNC(base, rex_indirect_target_)(ctx, base);  \
+  } while (0)
 #else
-#define REX_CALL_INDIRECT_FUNC(x)           \
-  ctx.last_indirect_target = (uint32_t)(x); \
-  REX_LOOKUP_FUNC(base, x)(ctx, base);
+#define REX_CALL_INDIRECT_FUNC(x)                            \
+  do {                                                       \
+    uint32_t rex_indirect_target_ = (uint32_t)(x);           \
+    ctx.last_indirect_target = rex_indirect_target_;         \
+    REX_LOOKUP_FUNC(base, rex_indirect_target_)(ctx, base);  \
+  } while (0)
 #endif
 
 //=============================================================================
