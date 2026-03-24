@@ -190,6 +190,13 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     static_cast<rex::input::InputSystem*>(runtime_->input_system())->AttachWindow(window_.get());
   }
 
+  // Register recompiled modules with KernelState (multi-binary projects).
+  // This populates the recompiled_modules_ registry so that LoadUserModule
+  // can match guest paths to shared libraries at runtime.
+  if (ppc_info_.register_modules) {
+    ppc_info_.register_modules(runtime_->kernel_state());
+  }
+
   if (imgui_drawer_) {
     auto* input_sys = static_cast<rex::input::InputSystem*>(runtime_->input_system());
     if (input_sys) {
