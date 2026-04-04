@@ -259,9 +259,11 @@ Result<void> MultiBinaryOrchestrator::Run(const OrchestratorOptions& opts) {
     dllArray = nlohmann::json::array();
     for (const auto& mod : manifest_.modules) {
       auto targetName = DeriveTargetName(mod.config);
+      auto guestPath = mod.guestPath;
+      std::replace(guestPath.begin(), guestPath.end(), '\\', '/');
       nlohmann::json dllEntry;
       dllEntry["pe_name"] = fs::path(mod.guestPath).filename().string();
-      dllEntry["guest_path"] = mod.guestPath;
+      dllEntry["guest_path"] = guestPath;
       dllEntry["shared_lib_name"] = manifest_.projectName + "_" + targetName;
       dllArray.push_back(dllEntry);
     }

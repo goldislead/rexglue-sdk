@@ -4,8 +4,20 @@
 {% for mod in dll_modules %}
 # DLL module: {{ mod.target_name }}
 if(EXISTS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ mod.output_dir }}/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES {{ cmake_var("GENERATED_SOURCES") }})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
     include({{ mod.output_dir }}/sources.cmake)
     set(DLL_SOURCES_{{ mod.target_name }} {{ cmake_var("GENERATED_SOURCES") }})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES {{ cmake_var("_REXGLUE_PREVIOUS_GENERATED_SOURCES") }})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
     add_library({{ mod.lib_name }} SHARED {{ cmake_var("DLL_SOURCES_" + mod.target_name) }})
     target_include_directories({{ mod.lib_name }} PRIVATE
         {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}

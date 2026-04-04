@@ -214,10 +214,9 @@ Result<void> InitModule(const InitModuleOptions& opts, const CliContext& ctx) {
   fs::path relXexPath = fs::relative(absoluteXexPath, root);
   std::string xexPath = relXexPath.generic_string();  // forward slashes
 
-  // guest_path: normalize to forward slashes only (do not strip user-supplied prefix —
-  // runtime matching already strips device prefixes like "game:\")
-  std::string guestPath = opts.guest_path;
-  std::replace(guestPath.begin(), guestPath.end(), '\\', '/');
+  // guest_path: canonicalize to the guest-visible module path used at runtime.
+  std::string guestPath =
+      rex::codegen::CanonicalizeModuleGuestPath(opts.guest_path, manifest->projectName);
 
   nlohmann::json data = {
       {"names", names_to_json(names)},
@@ -245,7 +244,7 @@ Result<void> InitModule(const InitModuleOptions& opts, const CliContext& ctx) {
 
   REXLOG_INFO("Module '{}' added to project", moduleName);
   REXLOG_INFO("  Config:     {}", configName);
-  REXLOG_INFO("  Guest path: {}", opts.guest_path);
+  REXLOG_INFO("  Guest path: {}", guestPath);
   REXLOG_INFO("  Output dir: generated/{}", moduleName);
 
   return Ok();

@@ -23,6 +23,9 @@ struct ManifestModuleEntry {
   std::string guestPath;         ///< Guest path for XexLoadImage matching
 };
 
+/// Normalize a module guest path to the title-visible path used for runtime matching.
+std::string CanonicalizeModuleGuestPath(std::string_view path, std::string_view project_name = {});
+
 struct ManifestConfig {
   std::string projectName;
   std::filesystem::path entrypointConfig;  ///< Absolute path to entrypoint config

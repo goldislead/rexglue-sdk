@@ -12,6 +12,16 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <rex/assert.h>
 #include <rex/kernel.h>
 #include <rex/logging.h>
@@ -21,6 +31,28 @@
 namespace rex::runtime {
 
 thread_local ThreadState* thread_state_ = nullptr;
+
+#ifdef _WIN32
+extern "C" __declspec(dllexport) ThreadState* rexglue_get_thread_state() {
+  return thread_state_;
+}
+
+namespace {
+
+using GetThreadStateFn = ThreadState* (*)();
+
+ThreadState* GetMainModuleThreadState() {
+  HMODULE main_module = GetModuleHandleW(nullptr);
+  if (!main_module) {
+    return nullptr;
+  }
+  auto get_thread_state = reinterpret_cast<GetThreadStateFn>(
+      GetProcAddress(main_module, "rexglue_get_thread_state"));
+  return get_thread_state ? get_thread_state() : nullptr;
+}
+
+}  // namespace
+#endif
 
 ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_address,
                          memory::Memory* memory)
@@ -54,11 +86,20 @@ void ThreadState::Bind(ThreadState* thread_state) {
 }
 
 ThreadState* ThreadState::Get() {
-  return thread_state_;
+  if (thread_state_) {
+    return thread_state_;
+  }
+
+#ifdef _WIN32
+  return GetMainModuleThreadState();
+#else
+  return nullptr;
+#endif
 }
 
 uint32_t ThreadState::GetThreadID() {
-  return thread_state_ ? thread_state_->thread_id_ : 0xFFFFFFFF;
+  auto* thread_state = Get();
+  return thread_state ? thread_state->thread_id_ : 0xFFFFFFFF;
 }
 
 }  // namespace rex::runtime

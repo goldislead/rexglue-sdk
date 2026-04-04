@@ -19,10 +19,78 @@
 #include <rex/perf/counter.h>
 #include <rex/memory.h>
 #include <rex/ppc/context.h>
+#include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace rex::runtime {
+
+namespace {
+
+void UnresolvedIndirectTrap(PPCContext& ctx, uint8_t* /*base*/) {
+  REX_FATAL("Call to unloaded or unregistered function at guest address 0x{:08X}",
+            ctx.last_indirect_target);
+}
+
+#ifdef _WIN32
+using GetFunctionDispatcherFn = FunctionDispatcher* (*)();
+
+FunctionDispatcher* GetMainModuleFunctionDispatcher() {
+  HMODULE main_module = ::GetModuleHandleW(nullptr);
+  if (!main_module) {
+    return nullptr;
+  }
+
+  auto get_function_dispatcher = reinterpret_cast<GetFunctionDispatcherFn>(
+      ::GetProcAddress(main_module, "rexglue_get_function_dispatcher"));
+  return get_function_dispatcher ? get_function_dispatcher() : nullptr;
+}
+
+FunctionDispatcher* GetBoundFunctionDispatcher() {
+  Runtime* runtime = Runtime::instance();
+  if (runtime && runtime->function_dispatcher()) {
+    return runtime->function_dispatcher();
+  }
+  return GetMainModuleFunctionDispatcher();
+}
+#else
+FunctionDispatcher* GetBoundFunctionDispatcher() {
+  Runtime* runtime = Runtime::instance();
+  return runtime ? runtime->function_dispatcher() : nullptr;
+}
+#endif
+
+}  // namespace
+
+#ifdef _WIN32
+extern "C" __declspec(dllexport) FunctionDispatcher* rexglue_get_function_dispatcher() {
+  Runtime* runtime = Runtime::instance();
+  return runtime ? runtime->function_dispatcher() : nullptr;
+}
+#endif
+
+PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
+  FunctionDispatcher* dispatcher = GetBoundFunctionDispatcher();
+  if (!dispatcher) {
+    return &UnresolvedIndirectTrap;
+  }
+
+  if (PPCFunc* func = dispatcher->GetFunction(guest_address)) {
+    return func;
+  }
+
+  return &UnresolvedIndirectTrap;
+}
 
 FunctionDispatcher::FunctionDispatcher(rex::memory::Memory* memory, ExportResolver* export_resolver)
     : memory_(memory), export_resolver_(export_resolver) {}
@@ -33,13 +101,17 @@ bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
   SCOPE_profile_cpu_f("cpu");
   PROFILE_FUNCTION_DISPATCHED();
 
-  auto fn = GetFunction(address);
+  PPCFunc* fn = GetFunction(address);
   if (!fn) {
     REXCPU_ERROR("Execute({:08X}): function not in function table", address);
     return false;
   }
 
   auto* ctx = thread_state->context();
+  auto* previous_thread_state = ThreadState::Get();
+
+  // Rebind the active guest thread for cross-module callbacks.
+  ThreadState::Bind(thread_state);
 
   ctx->r1.u64 -= 64 + 112;
 
@@ -50,6 +122,7 @@ bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
 
   ctx->lr = previous_lr;
   ctx->r1.u64 += 64 + 112;
+  ThreadState::Bind(previous_thread_state);
 
   return true;
 }
@@ -130,6 +203,8 @@ uint64_t FunctionDispatcher::ExecuteInterrupt(ThreadState* thread_state, uint32_
 
 bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t code_size,
                                                  uint32_t image_base, uint32_t image_size) {
+  std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
+
   // Check for overlapping module ranges (including dispatch table at IMAGE_BASE + IMAGE_SIZE).
   // Dispatch table size is (code_size + kThunkReserveSize) * 2 bytes.
   uint32_t new_table_end = image_base + image_size + (code_size + kThunkReserveSize) * 2;
@@ -178,6 +253,7 @@ void FunctionDispatcher::UnloadedModuleTrap(PPCContext& ctx, uint8_t* /*base*/) 
 }
 
 void FunctionDispatcher::SetFunction(uint32_t guest_address, ::PPCFunc* func) {
+  std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
   assert_true(!module_tables_.empty());
 
   // Store in C++ map (for FunctionDispatcher::Execute/GetFunction)
@@ -193,6 +269,7 @@ void FunctionDispatcher::SetFunction(uint32_t guest_address, ::PPCFunc* func) {
 }
 
 ::PPCFunc* FunctionDispatcher::GetFunction(uint32_t guest_address) {
+  std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
   auto it = function_table_.find(guest_address);
   if (it != function_table_.end()) {
     return it->second;
@@ -205,6 +282,7 @@ uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func) {
 }
 
 uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func, uint32_t caller_address) {
+  std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
   auto* mod = FindModuleByAddress(caller_address);
   if (!mod) {
     if (module_tables_.empty()) {
@@ -225,6 +303,7 @@ uint32_t FunctionDispatcher::AllocateThunk(::PPCFunc* func, uint32_t caller_addr
 }
 
 void FunctionDispatcher::RegisterModule(const std::string& module_id, RegisterFn register_func) {
+  std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
   assert_true(!recording_);
   if (recording_) {
     REX_FATAL("RegisterModule called while already recording (re-entrancy)");
@@ -246,6 +325,7 @@ void FunctionDispatcher::RegisterModule(const std::string& module_id, RegisterFn
 }
 
 void FunctionDispatcher::UnregisterModule(const std::string& module_id) {
+  std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
   auto it = module_addresses_.find(module_id);
   if (it == module_addresses_.end()) {
     REXLOG_WARN("UnregisterModule: module '{}' not found", module_id);

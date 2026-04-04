@@ -15,6 +15,16 @@
 
 #include <fmt/format.h>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
@@ -110,16 +120,54 @@ XThread::~XThread() {
 
 thread_local XThread* current_xthread_tls_ = nullptr;
 
+#ifdef _WIN32
+extern "C" __declspec(dllexport) XThread* rexglue_get_current_xthread() {
+  return current_xthread_tls_;
+}
+
+namespace {
+
+using GetCurrentXThreadFn = XThread* (*)();
+
+XThread* GetMainModuleCurrentXThread() {
+  HMODULE main_module = ::GetModuleHandleW(nullptr);
+  if (!main_module) {
+    return nullptr;
+  }
+
+  auto get_current_xthread =
+      reinterpret_cast<GetCurrentXThreadFn>(::GetProcAddress(main_module, "rexglue_get_current_xthread"));
+  return get_current_xthread ? get_current_xthread() : nullptr;
+}
+
+XThread* GetBoundCurrentXThread() {
+  if (current_xthread_tls_) {
+    return current_xthread_tls_;
+  }
+  return GetMainModuleCurrentXThread();
+}
+
+}  // namespace
+#else
+namespace {
+
+XThread* GetBoundCurrentXThread() {
+  return current_xthread_tls_;
+}
+
+}  // namespace
+#endif
+
 bool XThread::IsInThread() {
-  return current_xthread_tls_ != nullptr;
+  return GetBoundCurrentXThread() != nullptr;
 }
 
 bool XThread::IsInThread(XThread* other) {
-  return current_xthread_tls_ == other;
+  return GetBoundCurrentXThread() == other;
 }
 
 XThread* XThread::GetCurrentThread() {
-  XThread* thread = reinterpret_cast<XThread*>(current_xthread_tls_);
+  XThread* thread = GetBoundCurrentXThread();
   if (!thread) {
     assert_always("Attempting to use kernel stuff from a non-kernel thread");
   }

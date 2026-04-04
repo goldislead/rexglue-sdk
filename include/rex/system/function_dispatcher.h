@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -47,8 +48,7 @@ class FunctionDispatcher {
   uint64_t ExecuteInterrupt(ThreadState* thread_state, uint32_t address, uint64_t args[],
                             size_t arg_count);
 
-  // Shared constant: thunk region size per module. Used by both FunctionDispatcher
-  // and Memory for dispatch table sizing. Defined once here, referenced by Memory.
+  // Shared thunk region size per module.
   static constexpr uint32_t kThunkReserveSize = 0x10000;  // 64KB
 
   // rexglue function table management (per-module table at IMAGE_BASE + IMAGE_SIZE)
@@ -60,13 +60,10 @@ class FunctionDispatcher {
   uint32_t AllocateThunk(::PPCFunc* func);
   uint32_t AllocateThunk(::PPCFunc* func, uint32_t caller_address);
 
-  /// Register a module's functions. Calls register_func while recording all
-  /// addresses written via SetFunction. Recorded addresses are stored under
-  /// module_id for later UnregisterModule.
+  /// Register a module while recording guest addresses written via SetFunction.
   void RegisterModule(const std::string& module_id, RegisterFn register_func);
 
   /// Unregister all functions previously registered under module_id.
-  /// Overwrites their guest memory table slots with the trap function.
   void UnregisterModule(const std::string& module_id);
 
  private:
@@ -91,18 +88,21 @@ class FunctionDispatcher {
 
   rex::thread::global_critical_region global_critical_region_;
 
-  // C++ function lookup (for FunctionDispatcher::Execute/GetFunction from C++ code)
+  // Host-side function lookup.
   std::unordered_map<uint32_t, ::PPCFunc*> function_table_;
 
-  // Per-module function table metadata (small N, linear scan is fine)
+  // Per-module function table metadata.
   std::vector<ModuleTableInfo> module_tables_;
 
-  // Module recording for RegisterModule/UnregisterModule
+  // Module recording for RegisterModule/UnregisterModule.
   bool recording_ = false;
   std::vector<uint32_t> recording_addresses_;
 
-  // Recorded addresses per module (for UnregisterModule)
+  // Recorded addresses per module.
   std::unordered_map<std::string, std::vector<uint32_t>> module_addresses_;
+
+  // Protects dispatcher metadata during module registration and callback dispatch.
+  mutable std::recursive_mutex dispatch_mutex_;
 };
 
 }  // namespace rex::runtime
