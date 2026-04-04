@@ -232,6 +232,42 @@ Result<void> MigrateProject(const MigrateOptions& opts, const CliContext& ctx) {
     REXLOG_INFO("  Manifest already exists: {}", manifest_path.filename().string());
   }
 
+  // --- Patch generated *_config.h files missing PPC_THUNK_RESERVE_SIZE ---
+  // Pre-manifest codegen did not emit this define. The new PPC_CALL_INDIRECT_FUNC
+  // macro requires it, so any stale config header must be patched until re-codegen.
+  if (fs::exists(root / "generated")) {
+    static constexpr std::string_view kDefine = "PPC_THUNK_RESERVE_SIZE";
+    static constexpr std::string_view kAnchor = "PPC_CODE_SIZE";
+    static constexpr std::string_view kPatch  = "\n#define PPC_THUNK_RESERVE_SIZE 0x10000ull";
+
+    for (const auto& entry : fs::recursive_directory_iterator(root / "generated")) {
+      if (!entry.is_regular_file())
+        continue;
+      const auto& p = entry.path();
+      if (p.extension() != ".h" || !p.stem().string().ends_with("_config"))
+        continue;
+
+      std::string content = read_file_content(p);
+      if (content.find(kDefine) != std::string::npos)
+        continue;  // already present
+
+      // Insert after the PPC_CODE_SIZE line
+      auto pos = content.find(kAnchor);
+      if (pos == std::string::npos)
+        continue;  // not a ppc_config.h we recognise
+      auto eol = content.find('\n', pos);
+      if (eol == std::string::npos)
+        eol = content.size();
+
+      content.insert(eol, kPatch);
+      if (!write_file(p, content)) {
+        REXLOG_WARN("  Could not patch {}", p.filename().string());
+        continue;
+      }
+      REXLOG_INFO("  Patched {} (added PPC_THUNK_RESERVE_SIZE)", p.filename().string());
+    }
+  }
+
   REXLOG_INFO("Migration complete. Re-run CMake configure to pick up changes.");
 
   return Ok();

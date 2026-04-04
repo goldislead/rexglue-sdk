@@ -37,11 +37,6 @@ namespace rex::runtime {
 
 namespace {
 
-void UnresolvedIndirectTrap(PPCContext& ctx, uint8_t* /*base*/) {
-  REX_FATAL("Call to unloaded or unregistered function at guest address 0x{:08X}",
-            ctx.last_indirect_target);
-}
-
 #ifdef _WIN32
 using GetFunctionDispatcherFn = FunctionDispatcher* (*)();
 
@@ -72,6 +67,11 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 
 }  // namespace
 
+static void UnloadedModuleTrap(PPCContext& ctx, uint8_t* /*base*/) {
+  REX_FATAL("Call to unloaded or unregistered function at guest address 0x{:08X}",
+            ctx.last_indirect_target);
+}
+
 #ifdef _WIN32
 extern "C" __declspec(dllexport) FunctionDispatcher* rexglue_get_function_dispatcher() {
   Runtime* runtime = Runtime::instance();
@@ -82,14 +82,14 @@ extern "C" __declspec(dllexport) FunctionDispatcher* rexglue_get_function_dispat
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
   FunctionDispatcher* dispatcher = GetBoundFunctionDispatcher();
   if (!dispatcher) {
-    return &UnresolvedIndirectTrap;
+    return &UnloadedModuleTrap;
   }
 
   if (PPCFunc* func = dispatcher->GetFunction(guest_address)) {
     return func;
   }
 
-  return &UnresolvedIndirectTrap;
+  return &UnloadedModuleTrap;
 }
 
 FunctionDispatcher::FunctionDispatcher(rex::memory::Memory* memory, ExportResolver* export_resolver)
@@ -245,11 +245,6 @@ FunctionDispatcher::ModuleTableInfo* FunctionDispatcher::FindModuleByAddress(
     }
   }
   return nullptr;
-}
-
-void FunctionDispatcher::UnloadedModuleTrap(PPCContext& ctx, uint8_t* /*base*/) {
-  REX_FATAL("Call to unloaded or unregistered function at guest address 0x{:08X}",
-            ctx.last_indirect_target);
 }
 
 void FunctionDispatcher::SetFunction(uint32_t guest_address, ::PPCFunc* func) {

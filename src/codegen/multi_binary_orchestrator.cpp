@@ -180,6 +180,8 @@ Result<void> MultiBinaryOrchestrator::Run(const OrchestratorOptions& opts) {
     ctx.analysisState().entryPoint = ctx.binary().entryPoint();
     ctx.analysisState().imageSize = ctx.binary().imageSize();
     ctx.setHasDllModules(!manifest_.modules.empty());
+    if (ctx.Config().isDll.has_value())
+      ctx.setDllModule(*ctx.Config().isDll);
 
     contexts.push_back({std::move(ctx), &targeted[0]});
   }
@@ -201,7 +203,7 @@ Result<void> MultiBinaryOrchestrator::Run(const OrchestratorOptions& opts) {
     ctx.analysisState().loadAddress = ctx.binary().baseAddress();
     ctx.analysisState().entryPoint = ctx.binary().entryPoint();
     ctx.analysisState().imageSize = ctx.binary().imageSize();
-    ctx.setDllModule(true);
+    ctx.setDllModule(ctx.Config().isDll.value_or(true));
     ctx.setHasDllModules(true);
 
     contexts.push_back({std::move(ctx), &targeted[i + 1]});

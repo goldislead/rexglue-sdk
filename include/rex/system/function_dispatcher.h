@@ -69,9 +69,6 @@ class FunctionDispatcher {
  private:
   bool Execute(ThreadState* thread_state, uint32_t address);
 
-  /// Trap function for indirect calls to unloaded/unregistered addresses.
-  static void UnloadedModuleTrap(PPCContext& ctx, uint8_t* base);
-
   struct ModuleTableInfo {
     uint32_t code_base;
     uint32_t code_size;
