@@ -88,14 +88,11 @@ set_target_properties(ppc_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests/bin
 )
 
-# Strip Tracy/profiling instrumentation from test targets
 target_compile_options(ppc_tests PRIVATE
     -UTRACY_ENABLE -UREXGLUE_ENABLE_PROFILING
     -UREXGLUE_ENABLE_PERF_COUNTERS -UREXGLUE_PROFILE_GUEST_FUNCTIONS
+    -msse4.1 -mssse3
 )
-
-# Enable SSE4.1 for vector intrinsics used in generated code
-target_compile_options(ppc_tests PRIVATE -msse4.1 -mssse3)
 
 include(Catch)
 catch_discover_tests(ppc_tests
