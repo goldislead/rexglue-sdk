@@ -12,6 +12,7 @@
 
 #include <array>
 #include <climits>
+#include <cstdarg>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -138,6 +139,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
 
   void RestoreEdramSnapshot(const void* snapshot) override;
+
+  void PushDebugMarker(const char* format, ...);
+  void PopDebugMarker();
+  void InsertDebugMarker(const char* format, ...);
+  bool debug_markers_enabled() const { return debug_markers_enabled_; }
 
   ui::vulkan::VulkanDevice* GetVulkanDevice() const {
     return static_cast<const ui::vulkan::VulkanProvider*>(graphics_system_->provider())
@@ -558,6 +564,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::vector<CommandBuffer> command_buffers_writable_;
   std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
   DeferredCommandBuffer deferred_command_buffer_;
+  bool debug_markers_enabled_ = false;
 
   std::vector<VkSparseMemoryBind> sparse_memory_binds_;
   std::vector<SparseBufferBind> sparse_buffer_binds_;

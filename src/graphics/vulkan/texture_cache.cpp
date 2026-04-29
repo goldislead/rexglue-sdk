@@ -1793,6 +1793,9 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
   // Generate mip levels for scaled resolve textures via blit.
   if (level_last_for_blit_gen > 0) {
+    command_processor_.InsertDebugMarker("Mip Generation: %ux%u levels 1-%u",
+                                        width * texture_resolution_scale_x,
+                                        height * texture_resolution_scale_y, level_last_for_blit_gen);
     VkImage image = vulkan_texture.image();
     uint32_t scaled_width = width * texture_resolution_scale_x;
     uint32_t scaled_height = height * texture_resolution_scale_y;
