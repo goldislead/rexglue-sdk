@@ -99,6 +99,17 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
   return ReadbackResolveMode::kDisabled;
 }
 
+ZPDMode ParseZPDMode() {
+  const std::string& mode = REXCVAR_GET(occlusion_query);
+  if (mode == "strict") {
+    return ZPDMode::kStrict;
+  } else if (mode == "fast") {
+    return ZPDMode::kFast;
+  } else {
+    return ZPDMode::kFake;
+  }
+}
+
 }  // namespace
 
 CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
@@ -112,6 +123,7 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
       write_ptr_index_event_(rex::thread::Event::CreateAutoResetEvent(false)),
       write_ptr_index_(0) {
   assert_not_null(write_ptr_index_event_);
+  cached_zpd_mode_ = ParseZPDMode();
 }
 
 CommandProcessor::~CommandProcessor() = default;
@@ -380,10 +392,15 @@ bool CommandProcessor::Restore(::rex::stream::ByteStream* stream) {
 }
 
 bool CommandProcessor::SetupContext() {
+  cached_zpd_mode_ = ParseZPDMode();
+  ResetZPDState();
   return true;
 }
 
-void CommandProcessor::ShutdownContext() {}
+void CommandProcessor::ShutdownContext() {
+  ResetZPDState();
+  ShutdownZPDQueryResources();
+}
 
 void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
   read_ptr_index_ = 0;
@@ -684,6 +701,7 @@ void CommandProcessor::MakeCoherent() {
 
 void CommandProcessor::PrepareForWait() {
   trace_writer_.Flush();
+  PumpPendingRetire();
 }
 
 void CommandProcessor::ReturnFromWait() {}
@@ -1393,38 +1411,525 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_EXT(memory::RingBuffer* re
 
 bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                           uint32_t packet, uint32_t count) {
-  // Set by D3D as BE but struct ABI is LE
-  const uint32_t kQueryFinished = rex::byte_swap(0xFFFFFEED);
   assert_true(count == 1);
   uint32_t initiator = reader->ReadAndSwap<uint32_t>();
-  // Writeback initiator.
-  WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
+  uint32_t event_type = initiator & 0x3F;
 
-  // Occlusion queries:
-  // This command is send on query begin and end.
-  // As a workaround report some fixed amount of passed samples.
-  auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
-  if (fake_sample_count >= 0) {
-    auto* pSampleCounts = memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(
-        register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR]);
-    if (!pSampleCounts) {
+  WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, event_type);
+
+  uint32_t report_address = register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
+  uint32_t report_record_base = XenosZPDReport::GetRecordBase(report_address);
+  bool is_begin_record = XenosZPDReport::IsBeginRecord(report_address);
+  bool is_end_record = XenosZPDReport::IsEndRecord(report_address);
+
+  xe_gpu_depth_sample_counts* report =
+      report_record_base
+          ? memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(report_record_base)
+          : nullptr;
+
+  bool guest_marks_end = report && XenosZPDReport::HasPendingSentinel(report);
+  uint32_t slot_base = XenosZPDReport::GetSlotBase(report_address);
+  bool logical_active = zpd_active_segment_.logical_active;
+
+  auto write_batch_fake = [&]() {
+    if (!report_record_base) {
+      return;
+    }
+
+    if (REXCVAR_GET(occlusion_query_fake_lower_threshold) >= 0) {
+      fake_zpd_sample_count_ =
+          (fake_zpd_sample_count_ <=
+           static_cast<uint32_t>(REXCVAR_GET(occlusion_query_fake_lower_threshold)))
+              ? static_cast<uint32_t>(REXCVAR_GET(occlusion_query_fake_upper_threshold))
+              : fake_zpd_sample_count_ - 1;
+    } else if (fake_zpd_sample_count_ == 0) {
+      fake_zpd_sample_count_ = 1;
+    }
+
+    uint32_t step = std::max(uint32_t{1}, fake_zpd_sample_count_);
+    zpd_batch_fake_count_ = XenosZPDReport::AddSamples(zpd_batch_fake_count_, step);
+    XenosZPDReport::WriteSampleCount(report, zpd_batch_fake_count_);
+  };
+
+  if (REXCVAR_GET(occlusion_query_log) && report) {
+    REXGPU_INFO(
+        "ZPD: EVENT_WRITE_ZPD event={} report_address=0x{:08X} record=0x{:08X} "
+        "Total=({:08X},{:08X}) ZFail=({:08X},{:08X}) ZPass=({:08X},{:08X}) "
+        "Stencil=({:08X},{:08X}) pending={}",
+        event_type, report_address, report_record_base,
+        uint32_t(report->Total_A), uint32_t(report->Total_B),
+        uint32_t(report->ZFail_A), uint32_t(report->ZFail_B),
+        uint32_t(report->ZPass_A), uint32_t(report->ZPass_B),
+        uint32_t(report->StencilFail_A), uint32_t(report->StencilFail_B),
+        guest_marks_end);
+  }
+
+  if (zpd_batch_fake_) {
+    write_batch_fake();
+    return true;
+  }
+
+  // QueryBatch titles advance through pending records in steps within one page.
+  uint32_t batch_page_base = XenosZPDReport::GetBatchPageBase(report_address);
+  bool repeated_orphan_end = report_record_base && guest_marks_end && is_end_record &&
+                             !logical_active && batch_page_base != 0 &&
+                             zpd_batch_page_ == batch_page_base &&
+                             report_record_base == zpd_batch_last_record_;
+
+  if (report_record_base && guest_marks_end && batch_page_base != 0) {
+    if ((zpd_batch_page_ == batch_page_base &&
+         XenosZPDReport::IsBatchStep(zpd_batch_last_record_, report_record_base)) ||
+        repeated_orphan_end) {
+      ++zpd_batch_run_;
+    } else {
+      zpd_batch_page_ = batch_page_base;
+      zpd_batch_run_ = 1;
+    }
+    zpd_batch_last_record_ = report_record_base;
+
+    if (zpd_batch_run_ >= (repeated_orphan_end ? kZPDBatchRunThresholdOrphanEnd
+                                               : kZPDBatchRunThreshold)) {
+      zpd_batch_fake_ = true;
+      zpd_batch_fake_count_ = 0;
+      zpd_pending_retire_handle_ = kInvalidReportHandle;
+      zpd_pending_retire_stalls_ = 0;
+      REXGPU_INFO(
+          "ZPD: Batched occlusion query pattern detected, falling back to "
+          "fake sample counts.");
+      write_batch_fake();
       return true;
     }
-    // 0xFFFFFEED is written to this two locations by D3D only on D3DISSUE_END
-    // and used to detect a finished query.
-    bool is_end_via_z_pass =
-        pSampleCounts->ZPass_A == kQueryFinished && pSampleCounts->ZPass_B == kQueryFinished;
-    // Older versions of D3D also checks for ZFail (4D5307D5).
-    bool is_end_via_z_fail =
-        pSampleCounts->ZFail_A == kQueryFinished && pSampleCounts->ZFail_B == kQueryFinished;
-    std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
-    if (is_end_via_z_pass || is_end_via_z_fail) {
-      pSampleCounts->ZPass_A = fake_sample_count;
-      pSampleCounts->Total_A = fake_sample_count;
+  } else {
+    zpd_batch_page_ = 0;
+    zpd_batch_last_record_ = 0;
+    zpd_batch_run_ = 0;
+  }
+
+  if (GetZPDMode() != ZPDMode::kFake) {
+    if (logical_active && is_end_record) {
+      if (slot_base == zpd_active_segment_.slot_base) {
+        EndZPDReport(report_address, false);
+      }
+      return true;
+    }
+    if (is_begin_record) {
+      if (report) {
+        std::memset(report, 0, sizeof(xe_gpu_depth_sample_counts));
+      }
+      BeginZPDReport(report_address);
+      return true;
+    }
+    if (!logical_active && is_end_record) {
+      if (GetZPDMode() == ZPDMode::kFast) {
+        uint32_t cached_delta = 1;
+        auto cache_it = fast_zpd_report_cached_values_.find(report_record_base);
+        if (cache_it != fast_zpd_report_cached_values_.end()) {
+          cached_delta = cache_it->second;
+        }
+        WriteZPDReport(0, report_record_base, 0, cached_delta, false);
+      } else {
+        PumpQueryResolves();
+      }
+      return true;
     }
   }
 
+  // Conventional fake fallback.
+  if (REXCVAR_GET(occlusion_query_fake_lower_threshold) < 0 || !report_record_base ||
+      !guest_marks_end) {
+    return true;
+  }
+
+  fake_zpd_sample_count_ =
+      (fake_zpd_sample_count_ <=
+       static_cast<uint32_t>(REXCVAR_GET(occlusion_query_fake_lower_threshold)))
+          ? static_cast<uint32_t>(REXCVAR_GET(occlusion_query_fake_upper_threshold))
+          : fake_zpd_sample_count_ - 1;
+
+  XenosZPDReport::WriteSampleCount(report, fake_zpd_sample_count_);
   return true;
+}
+
+void CommandProcessor::SetZPDMode(ZPDMode mode) {
+  if (cached_zpd_mode_ == mode) {
+    return;
+  }
+  if (zpd_active_segment_.segment_active) {
+    CloseQuerySegment();
+  }
+  cached_zpd_mode_ = mode;
+}
+
+bool CommandProcessor::BeginZPDReport(uint32_t report_address) {
+  if (GetZPDMode() == ZPDMode::kFake || zpd_batch_fake_) {
+    return false;
+  }
+
+  uint32_t carried_cached_delta = 0;
+  uint32_t carried_from_slot_base = 0;
+
+  if (zpd_active_segment_.logical_active) {
+    if (zpd_active_segment_.end_record) {
+      EndZPDReport(zpd_active_segment_.end_record, true);
+    } else {
+      if (REXCVAR_GET(occlusion_query_log)) {
+        REXGPU_INFO("ZPD: BeginZPDReport forcing close without end record handle={}",
+                    zpd_active_segment_.report_handle);
+      }
+
+      carried_from_slot_base = zpd_active_segment_.slot_base;
+
+      auto dying_report = logical_zpd_reports_.find(zpd_active_segment_.report_handle);
+      if (dying_report != logical_zpd_reports_.end()) {
+        carried_cached_delta = dying_report->second.cached_delta;
+      }
+
+      if (zpd_active_segment_.segment_active) {
+        zpd_active_segment_.segment_active = false;
+        if (DiscardZPDQuery()) {
+          zpd_stats_.segments_ended++;
+        } else {
+          zpd_stats_.failed++;
+        }
+      }
+      logical_zpd_reports_.erase(zpd_active_segment_.report_handle);
+      zpd_active_segment_ = {};
+    }
+  }
+
+  uint32_t slot_base = XenosZPDReport::GetSlotBase(report_address);
+  uint32_t begin_record = XenosZPDReport::GetBeginRecordBase(slot_base);
+  uint32_t end_record = XenosZPDReport::GetEndRecordBase(slot_base);
+  if (!slot_base) {
+    return false;
+  }
+
+  uint64_t slot_sequence_id = ++zpd_slot_sequences_[slot_base];
+
+  ReportHandle report_handle = zpd_next_report_handle_++;
+  if (report_handle == kInvalidReportHandle) {
+    report_handle = zpd_next_report_handle_++;
+  }
+
+  ZPDReport& logical = logical_zpd_reports_[report_handle];
+  logical.slot_base = slot_base;
+  logical.slot_sequence_id = slot_sequence_id;
+  logical.begin_record = begin_record;
+  logical.end_record = end_record;
+  logical.begin_value = zpd_slot_values_[slot_base];
+  logical.accumulated_samples = 0;
+  logical.pending_segments = 0;
+  logical.cached_delta = 0;
+  logical.ended = false;
+
+  if (slot_base == carried_from_slot_base && carried_cached_delta != 0) {
+    logical.cached_delta = carried_cached_delta;
+  }
+
+  zpd_active_segment_.report_handle = report_handle;
+  zpd_active_segment_.slot_base = slot_base;
+  zpd_active_segment_.begin_record = begin_record;
+  zpd_active_segment_.end_record = end_record;
+  zpd_active_segment_.segment_active = false;
+  zpd_active_segment_.segment_pending_begin = true;
+  zpd_active_segment_.logical_active = true;
+
+  zpd_stats_.logical_begun++;
+  OpenQuerySegment(true);
+  return true;
+}
+
+bool CommandProcessor::EndZPDReport(uint32_t report_address, bool guest_forced_end) {
+  if (GetZPDMode() == ZPDMode::kFake || zpd_batch_fake_) {
+    return false;
+  }
+
+  ReportHandle report_handle = zpd_active_segment_.report_handle;
+  uint32_t stored_end_record = zpd_active_segment_.end_record;
+  uint32_t report_record_base = XenosZPDReport::GetRecordBase(report_address);
+  if (!report_record_base) {
+    report_record_base = stored_end_record;
+  }
+
+  if (zpd_active_segment_.segment_active) {
+    CloseQuerySegment();
+  }
+
+  zpd_active_segment_.segment_pending_begin = false;
+
+  if (!report_record_base) {
+    logical_zpd_reports_.erase(report_handle);
+    if (REXCVAR_GET(occlusion_query_log)) {
+      REXGPU_INFO("ZPD: EndZPDReport dropping handle={} with unknown record base forced={}",
+                  report_handle, guest_forced_end);
+    }
+    zpd_active_segment_ = {};
+    return false;
+  }
+
+  bool resolved_immediately = false;
+  uint32_t begin_record = 0;
+  uint32_t begin_value = 0;
+  uint32_t final_value = 0;
+  uint32_t cached_delta = 1;
+
+  auto it = logical_zpd_reports_.find(report_handle);
+  if (it == logical_zpd_reports_.end()) {
+    zpd_active_segment_ = {};
+    return false;
+  }
+
+  ZPDReport& logical = it->second;
+  logical.ended = true;
+  logical.end_record = report_record_base;
+  begin_record = logical.begin_record;
+  begin_value = logical.begin_value;
+
+  if (logical.pending_segments == 0) {
+    resolved_immediately = true;
+    final_value = NormalizeSampleCount(logical.accumulated_samples);
+
+    cached_delta = (final_value == 0 && logical.cached_delta != 0) ? logical.cached_delta
+                                                                    : final_value;
+    logical.cached_delta = cached_delta;
+    if (fast_zpd_report_cached_values_.size() >= kFastZPDCacheMaxEntries &&
+        !fast_zpd_report_cached_values_.count(report_record_base)) {
+      fast_zpd_report_cached_values_.clear();
+    }
+    fast_zpd_report_cached_values_[report_record_base] = cached_delta;
+    final_value = cached_delta;
+  } else {
+    if (logical.cached_delta != 0) {
+      cached_delta = logical.cached_delta;
+    }
+    auto cache_it = fast_zpd_report_cached_values_.find(report_record_base);
+    if (cache_it != fast_zpd_report_cached_values_.end()) {
+      cached_delta = cache_it->second;
+    }
+  }
+
+  if (resolved_immediately) {
+    CommitZPDReport(logical, final_value);
+    logical_zpd_reports_.erase(it);
+  }
+
+  bool has_cross_slot_end = stored_end_record && stored_end_record != report_record_base;
+  if (has_cross_slot_end) {
+    WriteZPDReport(0, stored_end_record, 0, begin_value, false);
+  }
+
+  if (GetZPDMode() == ZPDMode::kFast) {
+    bool write_begin = begin_record && report_record_base && begin_record != report_record_base;
+    uint32_t speculative = (write_begin && cached_delta == 0) ? 1 : cached_delta;
+    WriteZPDReport(begin_record, report_record_base, begin_value, speculative, write_begin);
+  } else if (!resolved_immediately) {
+    PumpQueryResolves();
+
+    if (zpd_pending_retire_handle_ != report_handle) {
+      zpd_pending_retire_handle_ = report_handle;
+      zpd_pending_retire_stalls_ = 0;
+    }
+  }
+
+  zpd_stats_.logical_ended++;
+  zpd_active_segment_ = {};
+  return true;
+}
+
+void CommandProcessor::OpenQuerySegment(bool can_close_submission) {
+  if (GetZPDMode() == ZPDMode::kFake || zpd_batch_fake_ ||
+      !zpd_active_segment_.logical_active || !zpd_active_segment_.segment_pending_begin ||
+      !CanOpenZPDQuery()) {
+    return;
+  }
+
+  EnsureZPDQueryResources();
+
+  if (!IsZPDQueryPoolReady()) {
+    zpd_stats_.failed++;
+    return;
+  }
+
+  PumpQueryResolves();
+
+  QueryOpenResult open_result =
+      OpenZPDQuery(zpd_active_segment_.report_handle, can_close_submission);
+  switch (open_result) {
+    case QueryOpenResult::kOpened:
+      break;
+    case QueryOpenResult::kDeferred:
+      return;
+    case QueryOpenResult::kPoolExhausted: {
+      zpd_stats_.pool_exhausted++;
+      if (GetZPDMode() == ZPDMode::kFast) {
+        auto it = logical_zpd_reports_.find(zpd_active_segment_.report_handle);
+        if (it != logical_zpd_reports_.end()) {
+          it->second.accumulated_samples =
+              std::max<uint64_t>(it->second.accumulated_samples, uint64_t{1});
+        }
+        zpd_active_segment_.segment_pending_begin = false;
+        return;
+      }
+      zpd_stats_.failed++;
+      return;
+    }
+    case QueryOpenResult::kFailed:
+    default:
+      zpd_stats_.failed++;
+      return;
+  }
+
+  zpd_active_segment_.segment_active = true;
+  zpd_active_segment_.segment_pending_begin = false;
+  zpd_stats_.segments_begun++;
+}
+
+void CommandProcessor::CloseQuerySegment() {
+  if (GetZPDMode() == ZPDMode::kFake || !zpd_active_segment_.segment_active) {
+    return;
+  }
+
+  if (!CloseZPDQuery(zpd_active_segment_.report_handle)) {
+    zpd_active_segment_.segment_active = false;
+    zpd_active_segment_.segment_pending_begin =
+        zpd_active_segment_.logical_active && !zpd_batch_fake_;
+    zpd_stats_.failed++;
+    return;
+  }
+
+  auto it = logical_zpd_reports_.find(zpd_active_segment_.report_handle);
+  if (it != logical_zpd_reports_.end()) {
+    it->second.pending_segments++;
+  }
+
+  zpd_active_segment_.segment_active = false;
+
+  if (zpd_batch_fake_) {
+    zpd_active_segment_.logical_active = false;
+  }
+
+  zpd_active_segment_.segment_pending_begin =
+      zpd_active_segment_.logical_active && !zpd_batch_fake_;
+  zpd_stats_.segments_ended++;
+}
+
+void CommandProcessor::OnZPDQueryResolved(ReportHandle report_handle, uint64_t raw_samples) {
+  auto it = logical_zpd_reports_.find(report_handle);
+  if (it == logical_zpd_reports_.end()) {
+    return;
+  }
+
+  ZPDReport& logical = it->second;
+
+  if (logical.pending_segments) {
+    logical.pending_segments--;
+  }
+
+  if (zpd_batch_fake_) {
+    if (logical.pending_segments == 0) {
+      logical_zpd_reports_.erase(it);
+    }
+    return;
+  }
+
+  logical.accumulated_samples += raw_samples;
+
+  if (logical.ended && logical.pending_segments == 0) {
+    uint32_t final_value = NormalizeSampleCount(logical.accumulated_samples);
+
+    logical.cached_delta = final_value;
+    if (logical.end_record) {
+      if (fast_zpd_report_cached_values_.size() >= kFastZPDCacheMaxEntries &&
+          !fast_zpd_report_cached_values_.count(logical.end_record)) {
+        fast_zpd_report_cached_values_.clear();
+      }
+      fast_zpd_report_cached_values_[logical.end_record] = final_value;
+    }
+    if (IsZPDReportCurrent(logical)) {
+      CommitZPDReport(logical, final_value);
+    }
+    logical_zpd_reports_.erase(it);
+  }
+}
+
+void CommandProcessor::PumpPendingRetire() {
+  if (zpd_batch_fake_) {
+    zpd_pending_retire_handle_ = kInvalidReportHandle;
+    zpd_pending_retire_stalls_ = 0;
+    return;
+  }
+
+  ReportHandle handle_to_await = zpd_pending_retire_handle_;
+
+  if (AwaitQueryResolve(handle_to_await)) {
+    zpd_pending_retire_handle_ = kInvalidReportHandle;
+    zpd_pending_retire_stalls_ = 0;
+    return;
+  }
+
+  auto logical_report = logical_zpd_reports_.find(handle_to_await);
+  if (logical_report == logical_zpd_reports_.end()) {
+    zpd_pending_retire_handle_ = kInvalidReportHandle;
+    zpd_pending_retire_stalls_ = 0;
+    return;
+  }
+
+  if (++zpd_pending_retire_stalls_ >= kStrictZPDRetireMaxStalls) {
+    if (REXCVAR_GET(occlusion_query_log)) {
+      REXGPU_INFO("ZPD: PumpPendingRetire stall limit reached handle={}, abandoning",
+                  handle_to_await);
+    }
+    if (IsZPDReportCurrent(logical_report->second)) {
+      CommitZPDReport(logical_report->second, logical_report->second.cached_delta);
+    }
+    logical_zpd_reports_.erase(logical_report);
+    zpd_pending_retire_handle_ = kInvalidReportHandle;
+    zpd_pending_retire_stalls_ = 0;
+  }
+}
+
+void CommandProcessor::WriteZPDReport(uint32_t begin_record, uint32_t end_record,
+                                      uint32_t begin_value, uint32_t delta_value,
+                                      bool write_begin_record) {
+  xenos::xe_gpu_depth_sample_counts* begin =
+      begin_record
+          ? memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(begin_record)
+          : nullptr;
+  if (!end_record) {
+    return;
+  }
+  xenos::xe_gpu_depth_sample_counts* end =
+      memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(end_record);
+
+  XenosZPDReport::WriteReportDelta(begin, end, begin_value, delta_value, write_begin_record);
+}
+
+void CommandProcessor::CommitZPDReport(ZPDReport& report, uint32_t delta_value) {
+  uint32_t end_record = XenosZPDReport::GetEndRecordBase(report.slot_base);
+  WriteZPDReport(report.begin_record, end_record, report.begin_value, delta_value,
+                 report.begin_record != 0);
+
+  uint64_t end_value =
+      static_cast<uint64_t>(report.begin_value) + static_cast<uint64_t>(delta_value);
+  zpd_slot_values_[report.slot_base] =
+      end_value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(end_value);
+}
+
+bool CommandProcessor::IsZPDReportCurrent(const ZPDReport& report) const {
+  auto seq_it = zpd_slot_sequences_.find(report.slot_base);
+  uint64_t current_seq = seq_it != zpd_slot_sequences_.end() ? seq_it->second : 0;
+  return current_seq == report.slot_sequence_id;
+}
+
+uint32_t CommandProcessor::NormalizeSampleCount(uint64_t samples) const {
+  if (samples == 0) {
+    return 0;
+  }
+
+  uint64_t scale = zpd_draw_resolution_scale_x_ * zpd_draw_resolution_scale_y_;
+  uint64_t normalized = scale <= 1 ? samples : (samples + (scale >> 1)) / scale;
+
+  return static_cast<uint32_t>(std::min<uint64_t>(normalized, UINT32_MAX));
 }
 
 bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet,
