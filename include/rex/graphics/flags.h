@@ -35,6 +35,11 @@ REXCVAR_DECLARE(bool, readback_memexport);
 REXCVAR_DECLARE(bool, readback_memexport_fast);
 REXCVAR_DECLARE(bool, occlusion_query_enable);
 REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
+REXCVAR_DECLARE(std::string, occlusion_query);
+REXCVAR_DECLARE(bool, occlusion_query_log);
+REXCVAR_DECLARE(int32_t, occlusion_query_fake_lower_threshold);
+REXCVAR_DECLARE(int32_t, occlusion_query_fake_upper_threshold);
+REXCVAR_DECLARE(double, occlusion_query_sample_count_saturation);
 
 // GPU Depth / Render Target Behavior
 REXCVAR_DECLARE(bool, depth_float24_round);
