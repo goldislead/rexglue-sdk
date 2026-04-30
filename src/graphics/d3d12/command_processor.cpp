@@ -114,6 +114,11 @@ void D3D12CommandProcessor::InvalidateGpuMemory() {
   }
 }
 
+void D3D12CommandProcessor::ClearReadbackBuffers() {
+  readback_buffers_.clear();
+  memexport_readback_buffers_.clear();
+}
+
 void D3D12CommandProcessor::InvalidateAllVertexBufferResidency() {
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
