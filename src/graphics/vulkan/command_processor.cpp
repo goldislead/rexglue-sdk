@@ -643,6 +643,11 @@ void VulkanCommandProcessor::InvalidateGpuMemory() {
   }
 }
 
+void VulkanCommandProcessor::ClearReadbackBuffers() {
+  readback_buffers_.clear();
+  memexport_readback_buffers_.clear();
+}
+
 void VulkanCommandProcessor::InvalidateAllVertexBufferResidency() {
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
@@ -3571,6 +3576,11 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
 }
 
 void VulkanCommandProcessor::OnPrimaryBufferEnd() {
+  // Pump completed ZPD resolves and any pending strict-mode retires now,
+  // since the guest is likely about to poll for results.
+  PumpQueryResolves();
+  PumpPendingRetire();
+
   if (REXCVAR_GET(vulkan_submit_on_primary_buffer_end) && submission_open_ &&
       CanEndSubmissionImmediately()) {
     EndSubmission(false);

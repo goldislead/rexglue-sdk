@@ -131,6 +131,7 @@ class CommandProcessor {
 
   virtual void ClearCaches();
   virtual void InvalidateGpuMemory();
+  virtual void ClearReadbackBuffers() {}
 
   // "Desired" is for the external thread managing the post-processing effect.
   SwapPostEffect GetDesiredSwapPostEffect() const { return swap_post_effect_desired_; }
