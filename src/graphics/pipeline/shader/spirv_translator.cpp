@@ -123,11 +123,11 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const 
       spirv_version = g_cached_spirv_version.value();
     } else if (TestSpirvVersionSupport(vulkan_device, spv::Spv_1_5)) {
       spirv_version = spv::Spv_1_5;
-      g_cached_spirv_version = spirv_version;
+      g_cached_spirv_version = static_cast<spv::SpvVersion>(spirv_version);
       REXLOG_INFO("SPIR-V 1.5 shader module test passed; using SPIR-V 1.5");
     } else {
       spirv_version = spv::Spv_1_0;
-      g_cached_spirv_version = spirv_version;
+      g_cached_spirv_version = static_cast<spv::SpvVersion>(spirv_version);
       REXLOG_WARN("SPIR-V 1.5 shader module test failed; falling back to SPIR-V 1.0");
     }
   }
