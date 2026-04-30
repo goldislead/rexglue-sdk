@@ -70,6 +70,7 @@ REXCVAR_DECLARE(bool, execute_unclipped_draw_vs_on_cpu_with_scissor);
 REXCVAR_DECLARE(bool, force_convert_line_loops_to_strips);
 REXCVAR_DECLARE(bool, force_convert_quad_lists_to_triangle_lists);
 REXCVAR_DECLARE(bool, force_convert_triangle_fans_to_lists);
+REXCVAR_DECLARE(bool, force_convert_triangle_strips_to_lists);
 REXCVAR_DECLARE(int32_t, primitive_processor_cache_min_indices);
 
 // GPU Debug

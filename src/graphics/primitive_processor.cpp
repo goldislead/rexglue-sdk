@@ -37,6 +37,9 @@ REXCVAR_DEFINE_BOOL(force_convert_quad_lists_to_triangle_lists, false, "GPU",
 REXCVAR_DEFINE_BOOL(force_convert_triangle_fans_to_lists, false, "GPU",
                     "Force convert triangle fans to lists");
 
+REXCVAR_DEFINE_BOOL(force_convert_triangle_strips_to_lists, false, "GPU",
+                    "Force convert triangle strips to lists");
+
 REXCVAR_DEFINE_INT32(primitive_processor_cache_min_indices, 4096, "GPU",
                      "Minimum indices for primitive processor cache")
     .range(0, 1000000);
@@ -133,6 +136,7 @@ bool PrimitiveProcessor::InitializeCommon(bool full_32bit_vertex_indices_support
       !line_loops_supported || REXCVAR_GET(force_convert_line_loops_to_strips);
   convert_quad_lists_to_triangle_lists_ =
       !quad_lists_supported || REXCVAR_GET(force_convert_quad_lists_to_triangle_lists);
+  convert_triangle_strips_to_lists_ = REXCVAR_GET(force_convert_triangle_strips_to_lists);
   // No override cvars as hosts are not required to support the fallback paths
   // since they require different vertex shader structure (for the fallback
   // HostVertexShaderTypes).
@@ -184,6 +188,12 @@ bool PrimitiveProcessor::InitializeCommon(bool full_32bit_vertex_indices_support
   } else {
     builtin_ib_offset_quad_lists_to_triangle_lists_ = SIZE_MAX;
   }
+  if (convert_triangle_strips_to_lists_) {
+    builtin_ib_offset_triangle_strips_to_lists_ = builtin_index_buffer_size;
+    builtin_index_buffer_size += sizeof(uint16_t) * GetTriangleStripListIndexCount(UINT16_MAX);
+  } else {
+    builtin_ib_offset_triangle_strips_to_lists_ = SIZE_MAX;
+  }
   if (builtin_index_buffer_size) {
     if (!InitializeBuiltinIndexBuffer(
             builtin_index_buffer_size, [this, builtin_ib_two_triangle_strip_count](void* mapping) {
@@ -234,6 +244,21 @@ bool PrimitiveProcessor::InitializeCommon(bool full_32bit_vertex_indices_support
                   *(triangle_list_ptr++) = quad_first_index;
                   *(triangle_list_ptr++) = quad_first_index + 2;
                   *(triangle_list_ptr++) = quad_first_index + 3;
+                }
+              }
+              if (builtin_ib_offset_triangle_strips_to_lists_ != SIZE_MAX) {
+                uint16_t* triangle_list_ptr =
+                    mapping_16bit + builtin_ib_offset_triangle_strips_to_lists_ / sizeof(uint16_t);
+                for (uint32_t i = 2; i < UINT16_MAX; ++i) {
+                  if ((i & 1) == 0) {
+                    *(triangle_list_ptr++) = uint16_t(i - 2);
+                    *(triangle_list_ptr++) = uint16_t(i - 1);
+                    *(triangle_list_ptr++) = uint16_t(i);
+                  } else {
+                    *(triangle_list_ptr++) = uint16_t(i - 1);
+                    *(triangle_list_ptr++) = uint16_t(i - 2);
+                    *(triangle_list_ptr++) = uint16_t(i);
+                  }
                 }
               }
             })) {
@@ -303,10 +328,13 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
     host_vertex_shader_type = Shader::HostVertexShaderType(-1);
     switch (guest_primitive_type) {
       case xenos::PrimitiveType::kTriangleList:
+      case xenos::PrimitiveType::kTriangleFan:
+      case xenos::PrimitiveType::kTriangleStrip:
         // Also supported by triangle strips and fans according to:
         // https://www.khronos.org/registry/OpenGL/extensions/AMD/AMD_vertex_shader_tessellator.txt
-        // Would need to convert those to triangle lists, but haven't seen any
-        // games using tessellated strips / fans so far.
+        if (guest_primitive_type != xenos::PrimitiveType::kTriangleList) {
+          host_primitive_type = xenos::PrimitiveType::kTriangleList;
+        }
         switch (tessellation_mode) {
           case xenos::TessellationMode::kDiscrete:
             // - 415607E1 - nets above barrels in the beginning of the first
@@ -376,8 +404,12 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
       case xenos::PrimitiveType::kLineList:
       case xenos::PrimitiveType::kLineStrip:
       case xenos::PrimitiveType::kTriangleList:
-      case xenos::PrimitiveType::kTriangleStrip:
         // Supported natively on all backends.
+        break;
+      case xenos::PrimitiveType::kTriangleStrip:
+        if (convert_triangle_strips_to_lists_) {
+          host_primitive_type = xenos::PrimitiveType::kTriangleList;
+        }
         break;
       case xenos::PrimitiveType::kRectangleList:
         if (expand_rectangle_lists_in_vs_) {
@@ -511,9 +543,25 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
           assert_true(host_primitive_type == xenos::PrimitiveType::kTriangleList);
           cacheable.host_draw_vertex_count =
               GetTriangleFanListIndexCount(cacheable.host_draw_vertex_count);
-          cacheable.index_buffer_type = ProcessedIndexBufferType::kHostBuiltinForAuto;
-          assert_true(builtin_ib_offset_triangle_fans_to_lists_ != SIZE_MAX);
-          cacheable.host_index_buffer_handle = builtin_ib_offset_triangle_fans_to_lists_;
+          if (builtin_ib_offset_triangle_fans_to_lists_ != SIZE_MAX) {
+            cacheable.index_buffer_type = ProcessedIndexBufferType::kHostBuiltinForAuto;
+            cacheable.host_index_buffer_handle = builtin_ib_offset_triangle_fans_to_lists_;
+          } else if (cacheable.host_draw_vertex_count) {
+            cacheable.index_buffer_type = ProcessedIndexBufferType::kHostConverted;
+            auto host_indices =
+                reinterpret_cast<uint16_t*>(RequestHostConvertedIndexBufferForCurrentFrame(
+                    xenos::IndexFormat::kInt16, cacheable.host_draw_vertex_count, false, 0,
+                    cacheable.host_index_buffer_handle));
+            if (!host_indices) {
+              return false;
+            }
+            uint16_t* host_indices_write = host_indices;
+            for (uint32_t i = 2; i < guest_draw_vertex_count; ++i) {
+              *(host_indices_write++) = uint16_t(i - 1);
+              *(host_indices_write++) = uint16_t(i);
+              *(host_indices_write++) = 0;
+            }
+          }
           break;
         case xenos::PrimitiveType::kLineLoop:
           // Plus 1 element (if there's anything to draw) in the strip, still
@@ -533,6 +581,36 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
           cacheable.index_buffer_type = ProcessedIndexBufferType::kHostBuiltinForAuto;
           assert_true(builtin_ib_offset_quad_lists_to_triangle_lists_ != SIZE_MAX);
           cacheable.host_index_buffer_handle = builtin_ib_offset_quad_lists_to_triangle_lists_;
+          break;
+        case xenos::PrimitiveType::kTriangleStrip:
+          assert_true(host_primitive_type == xenos::PrimitiveType::kTriangleList);
+          cacheable.host_draw_vertex_count =
+              GetTriangleStripListIndexCount(cacheable.host_draw_vertex_count);
+          if (builtin_ib_offset_triangle_strips_to_lists_ != SIZE_MAX) {
+            cacheable.index_buffer_type = ProcessedIndexBufferType::kHostBuiltinForAuto;
+            cacheable.host_index_buffer_handle = builtin_ib_offset_triangle_strips_to_lists_;
+          } else if (cacheable.host_draw_vertex_count) {
+            cacheable.index_buffer_type = ProcessedIndexBufferType::kHostConverted;
+            auto host_indices =
+                reinterpret_cast<uint16_t*>(RequestHostConvertedIndexBufferForCurrentFrame(
+                    xenos::IndexFormat::kInt16, cacheable.host_draw_vertex_count, false, 0,
+                    cacheable.host_index_buffer_handle));
+            if (!host_indices) {
+              return false;
+            }
+            uint16_t* host_indices_write = host_indices;
+            for (uint32_t i = 2; i < guest_draw_vertex_count; ++i) {
+              if ((i & 1) == 0) {
+                *(host_indices_write++) = uint16_t(i - 2);
+                *(host_indices_write++) = uint16_t(i - 1);
+                *(host_indices_write++) = uint16_t(i);
+              } else {
+                *(host_indices_write++) = uint16_t(i - 1);
+                *(host_indices_write++) = uint16_t(i - 2);
+                *(host_indices_write++) = uint16_t(i);
+              }
+            }
+          }
           break;
         default:
           assert_always();
@@ -661,6 +739,9 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
             break;
           case xenos::PrimitiveType::kQuadList:
             host_index_count_getter = GetQuadListTriangleListIndexCount;
+            break;
+          case xenos::PrimitiveType::kTriangleStrip:
+            host_index_count_getter = GetTriangleStripListIndexCount;
             break;
           default:
             assert_unhandled_case(guest_primitive_type);
