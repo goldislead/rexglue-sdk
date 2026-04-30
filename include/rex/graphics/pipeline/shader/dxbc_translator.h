@@ -318,7 +318,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
     uint32_t alpha_to_mask;
     uint32_t edram_32bpp_tile_pitch_dwords_scaled;
     uint32_t edram_depth_base_dwords_scaled;
-    uint32_t padding_edram_depth_base_dwords_scaled;
+    // UINT32_MAX when this draw is outside an active ZPD segment.
+    uint32_t zpd_rov_counter_index;
 
     float color_exp_bias[4];
 
@@ -420,6 +421,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
       kAlphaToMask,
       kEdram32bppTilePitchDwordsScaled,
       kEdramDepthBaseDwordsScaled,
+      kZpdRovCounterIndex,
 
       kColorExpBias,
 
@@ -502,6 +504,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
   enum class UAVRegister {
     kSharedMemory,
     kEdram,
+    kZpdRovCounter,
   };
 
   uint64_t GetDefaultVertexShaderModification(
@@ -747,6 +750,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // factor_temp can be the same as src_temp or dst_temp.
   void ROV_HandleAlphaBlendFactorCases(uint32_t src_temp, uint32_t dst_temp, uint32_t factor_temp,
                                        uint32_t factor_component);
+  void ROV_AddPassedMSAASamplesToZPD();
 
   // Writing the prologue.
   // Applies the offset to vertex or tessellation patch indices in the source
@@ -1152,6 +1156,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
   uint32_t uav_count_;
   uint32_t uav_index_shared_memory_;
   uint32_t uav_index_edram_;
+  uint32_t uav_index_zpd_rov_counter_;
 
   std::vector<SamplerBinding> sampler_bindings_;
 };
