@@ -4259,6 +4259,9 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
     current_samplers_vertex_.resize(
         std::max(current_samplers_vertex_.size(), sampler_count_vertex));
     for (size_t i = 0; i < sampler_count_vertex; ++i) {
+      if (i + 2 < sampler_count_vertex) {
+        texture_cache_->PrefetchSamplerParameters(samplers_vertex[i + 2]);
+      }
       D3D12TextureCache::SamplerParameters parameters =
           texture_cache_->GetSamplerParameters(samplers_vertex[i]);
       if (current_samplers_vertex_[i] != parameters) {
@@ -4291,6 +4294,9 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       current_samplers_pixel_.resize(
           std::max(current_samplers_pixel_.size(), size_t(sampler_count_pixel)));
       for (uint32_t i = 0; i < sampler_count_pixel; ++i) {
+        if (i + 2 < sampler_count_pixel) {
+          texture_cache_->PrefetchSamplerParameters((*samplers_pixel)[i + 2]);
+        }
         D3D12TextureCache::SamplerParameters parameters =
             texture_cache_->GetSamplerParameters((*samplers_pixel)[i]);
         if (current_samplers_pixel_[i] != parameters) {

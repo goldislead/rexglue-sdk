@@ -925,6 +925,16 @@ uint32_t D3D12TextureCache::GetActiveTextureBindlessSRVIndex(
   return descriptor_index;
 }
 
+void D3D12TextureCache::PrefetchSamplerParameters(
+    const D3D12Shader::SamplerBinding& binding) const {
+#if defined(__GNUC__) || defined(__clang__)
+  __builtin_prefetch(
+      &register_file()[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 6]);
+#else
+  (void)binding;
+#endif
+}
+
 D3D12TextureCache::SamplerParameters D3D12TextureCache::GetSamplerParameters(
     const D3D12Shader::SamplerBinding& binding) const {
   const auto& regs = register_file();
@@ -1335,6 +1345,15 @@ void D3D12TextureCache::TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATE
   ScaledResolveVirtualBuffer& buffer = GetCurrentScaledResolveBuffer();
   command_processor_.PushTransitionBarrier(buffer.resource(), buffer.SetResourceState(new_state),
                                            new_state);
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS D3D12TextureCache::GetCurrentScaledResolveRangeGPUAddress() const {
+  assert_true(IsDrawResolutionScaled());
+  const size_t buffer_index = GetCurrentScaledResolveBufferIndex();
+  const ScaledResolveVirtualBuffer* buffer = scaled_resolve_2gb_buffers_[buffer_index].get();
+  assert_not_null(buffer);
+  return buffer->resource()->GetGPUVirtualAddress() +
+         (scaled_resolve_current_range_start_scaled_ - (uint64_t(buffer_index) << 30));
 }
 
 void D3D12TextureCache::CreateCurrentScaledResolveRangeUintPow2SRV(
