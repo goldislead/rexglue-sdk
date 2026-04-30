@@ -3594,7 +3594,7 @@ void VulkanCommandProcessor::OnPrimaryBufferEnd() {
   PumpPendingRetire();
 
   if (REXCVAR_GET(vulkan_submit_on_primary_buffer_end) && submission_open_ &&
-      CanEndSubmissionImmediately()) {
+      !scratch_buffer_used_ && CanEndSubmissionImmediately()) {
     EndSubmission(false);
   }
 }
