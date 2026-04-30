@@ -88,6 +88,45 @@ bool RangeHasAnyConstantUsage(const uint64_t* usage_map, uint32_t first_constant
   return (usage_map[last_word] & last_mask) != 0;
 }
 
+void PrefetchReadRange(const void* data, size_t length) {
+  if (!data || !length) {
+    return;
+  }
+#if defined(__GNUC__) || defined(__clang__)
+  const auto* bytes = static_cast<const uint8_t*>(data);
+  __builtin_prefetch(bytes, 0, 3);
+  if (length > 64) {
+    __builtin_prefetch(bytes + 64, 0, 3);
+  }
+  if (length > 128) {
+    __builtin_prefetch(bytes + 128, 0, 3);
+  }
+  if (length > 192) {
+    __builtin_prefetch(bytes + 192, 0, 3);
+  }
+#elif REX_ARCH_AMD64
+  const auto* bytes = static_cast<const char*>(data);
+  _mm_prefetch(bytes, _MM_HINT_T0);
+  if (length > 64) {
+    _mm_prefetch(bytes + 64, _MM_HINT_T0);
+  }
+  if (length > 128) {
+    _mm_prefetch(bytes + 128, _MM_HINT_T0);
+  }
+  if (length > 192) {
+    _mm_prefetch(bytes + 192, _MM_HINT_T0);
+  }
+#else
+  (void)data;
+  (void)length;
+#endif
+}
+
+template <uint32_t lower_bound, uint32_t upper_bound, uint32_t range_start, uint32_t range_end>
+constexpr bool RegisterBoundsMayOverlap() {
+  return lower_bound < range_end && upper_bound > range_start;
+}
+
 }  // namespace
 
 D3D12CommandProcessor::D3D12CommandProcessor(D3D12GraphicsSystem* graphics_system,
@@ -1799,143 +1838,463 @@ void D3D12CommandProcessor::ShutdownContext() {
   CommandProcessor::ShutdownContext();
 }
 
-void D3D12CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
-  CommandProcessor::WriteRegister(index, value);
+void D3D12CommandProcessor::WriteRegisterForceinline(uint32_t index, uint32_t value) {
+  if (index >= RegisterFile::kRegisterCount) {
+    CommandProcessor::WriteRegister(index, value);
+    return;
+  }
 
-  if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+  const_cast<volatile uint32_t&>(register_file_->values[index]) = value;
+
+#if REX_ARCH_AMD64
+  __m128i to_rangecheck = _mm_set1_epi16(static_cast<short>(index));
+  __m128i lower_bounds = _mm_setr_epi16(
+      XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 - 1, XE_GPU_REG_SHADER_CONSTANT_000_X - 1,
+      XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 - 1, XE_GPU_REG_SCRATCH_REG0 - 1,
+      XE_GPU_REG_COHER_STATUS_HOST - 1, XE_GPU_REG_DC_LUT_RW_INDEX - 1, 0, 0);
+  __m128i upper_bounds = _mm_setr_epi16(
+      XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 + 1, XE_GPU_REG_SHADER_CONSTANT_511_W + 1,
+      XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1, XE_GPU_REG_SCRATCH_REG7 + 1,
+      XE_GPU_REG_COHER_STATUS_HOST + 1, XE_GPU_REG_DC_LUT_30_COLOR + 1, 0, 0);
+  __m128i is_above_lower = _mm_cmpgt_epi16(to_rangecheck, lower_bounds);
+  __m128i is_below_upper = _mm_cmplt_epi16(to_rangecheck, upper_bounds);
+  __m128i is_within_range = _mm_and_si128(is_above_lower, is_below_upper);
+  uint32_t movmask = static_cast<uint32_t>(_mm_movemask_epi8(is_within_range));
+#else
+  auto in_range = [index](uint32_t lower, uint32_t upper) -> uint32_t {
+    return (index > lower && index < upper) ? 0x3 : 0;
+  };
+  uint32_t movmask = 0;
+  movmask |=
+      in_range(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 - 1, XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 + 1)
+      << 0;
+  movmask |= in_range(XE_GPU_REG_SHADER_CONSTANT_000_X - 1, XE_GPU_REG_SHADER_CONSTANT_511_W + 1)
+             << 2;
+  movmask |=
+      in_range(XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 - 1, XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1)
+      << 4;
+  movmask |= in_range(XE_GPU_REG_SCRATCH_REG0 - 1, XE_GPU_REG_SCRATCH_REG7 + 1) << 6;
+  movmask |= in_range(XE_GPU_REG_COHER_STATUS_HOST - 1, XE_GPU_REG_COHER_STATUS_HOST + 1) << 8;
+  movmask |= in_range(XE_GPU_REG_DC_LUT_RW_INDEX - 1, XE_GPU_REG_DC_LUT_30_COLOR + 1) << 10;
+#endif
+
+  if (!movmask) {
+    return;
+  }
+
+  if (movmask & (1u << 3)) {
     if (frame_open_) {
       uint32_t float_constant_index = (index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
       if (float_constant_index >= 256) {
         float_constant_index -= 256;
         if (current_float_constant_map_pixel_[float_constant_index >> 6] &
-            (1ull << (float_constant_index & 63))) {
+            (UINT64_C(1) << (float_constant_index & 63))) {
           cbuffer_binding_float_pixel_.up_to_date = false;
         }
       } else {
         if (current_float_constant_map_vertex_[float_constant_index >> 6] &
-            (1ull << (float_constant_index & 63))) {
+            (UINT64_C(1) << (float_constant_index & 63))) {
           cbuffer_binding_float_vertex_.up_to_date = false;
         }
       }
     }
-  } else if (index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
-             index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
+  } else if (movmask & (1u << 5)) {
     cbuffer_binding_bool_loop_.up_to_date = false;
-  } else if (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
-             index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+  } else if (movmask & (1u << 1)) {
     cbuffer_binding_fetch_.up_to_date = false;
-    if (texture_cache_ != nullptr) {
-      texture_cache_->TextureFetchConstantWritten((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) /
-                                                  6);
+    uint32_t fetch_index = (index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6;
+    if (texture_cache_) {
+      texture_cache_->TextureFetchConstantWritten(fetch_index);
     }
     InvalidateVertexBufferResidency((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 2);
+  } else {
+    HandleSpecialRegisterWriteFast(index, value);
   }
+}
+
+void D3D12CommandProcessor::HandleSpecialRegisterWriteFast(uint32_t index, uint32_t value) {
+  RegisterFile& regs = *register_file_;
+
+  if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {
+    uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
+    if ((UINT32_C(1) << scratch_reg) & regs.values[XE_GPU_REG_SCRATCH_UMSK]) {
+      uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
+      uint32_t mem_addr = scratch_addr + (scratch_reg * sizeof(uint32_t));
+      memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
+    }
+    return;
+  }
+
+  switch (index) {
+    case XE_GPU_REG_COHER_STATUS_HOST:
+      const_cast<volatile uint32_t&>(regs.values[index]) |= UINT32_C(0x80000000);
+      break;
+
+    case XE_GPU_REG_DC_LUT_RW_INDEX:
+      gamma_ramp_rw_component_ = 0;
+      break;
+
+    case XE_GPU_REG_DC_LUT_SEQ_COLOR: {
+      assert_zero(regs[XE_GPU_REG_DC_LUT_RW_MODE] & 0b1);
+      auto gamma_ramp_rw_index = regs.Get<reg::DC_LUT_RW_INDEX>();
+      bool write_gamma_ramp_component = (regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] &
+                                         (UINT32_C(1) << (2 - gamma_ramp_rw_component_))) != 0;
+      if (write_gamma_ramp_component) {
+        reg::DC_LUT_30_COLOR& gamma_ramp_entry =
+            gamma_ramp_256_entry_table_[gamma_ramp_rw_index.rw_index];
+        uint32_t gamma_ramp_seq_color = regs.Get<reg::DC_LUT_SEQ_COLOR>().seq_color >> 6;
+        switch (gamma_ramp_rw_component_) {
+          case 0:
+            gamma_ramp_entry.color_10_red = gamma_ramp_seq_color;
+            break;
+          case 1:
+            gamma_ramp_entry.color_10_green = gamma_ramp_seq_color;
+            break;
+          case 2:
+            gamma_ramp_entry.color_10_blue = gamma_ramp_seq_color;
+            break;
+        }
+      }
+      if (++gamma_ramp_rw_component_ >= 3) {
+        gamma_ramp_rw_component_ = 0;
+        reg::DC_LUT_RW_INDEX new_gamma_ramp_rw_index = gamma_ramp_rw_index;
+        ++new_gamma_ramp_rw_index.rw_index;
+        WriteRegisterForceinline(XE_GPU_REG_DC_LUT_RW_INDEX,
+                                 rex::memory::Reinterpret<uint32_t>(new_gamma_ramp_rw_index));
+      }
+      if (write_gamma_ramp_component) {
+        OnGammaRamp256EntryTableValueWritten();
+      }
+    } break;
+
+    case XE_GPU_REG_DC_LUT_PWL_DATA: {
+      assert_not_zero(regs[XE_GPU_REG_DC_LUT_RW_MODE] & 0b1);
+      auto gamma_ramp_rw_index = regs.Get<reg::DC_LUT_RW_INDEX>();
+      uint32_t gamma_ramp_rw_index_pwl = gamma_ramp_rw_index.rw_index & 0x7F;
+      bool write_gamma_ramp_component = (regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] &
+                                         (UINT32_C(1) << (2 - gamma_ramp_rw_component_))) != 0;
+      if (write_gamma_ramp_component) {
+        reg::DC_LUT_PWL_DATA& gamma_ramp_entry =
+            gamma_ramp_pwl_rgb_[gamma_ramp_rw_index_pwl][gamma_ramp_rw_component_];
+        auto gamma_ramp_value = regs.Get<reg::DC_LUT_PWL_DATA>();
+        gamma_ramp_entry.base = gamma_ramp_value.base & ~UINT32_C(0x3F);
+        gamma_ramp_entry.delta = gamma_ramp_value.delta & ~UINT32_C(0x3F);
+      }
+      if (++gamma_ramp_rw_component_ >= 3) {
+        gamma_ramp_rw_component_ = 0;
+        reg::DC_LUT_RW_INDEX new_gamma_ramp_rw_index = gamma_ramp_rw_index;
+        new_gamma_ramp_rw_index.rw_index = (gamma_ramp_rw_index.rw_index & ~UINT32_C(0x7F)) |
+                                           ((gamma_ramp_rw_index_pwl + 1) & 0x7F);
+        WriteRegisterForceinline(XE_GPU_REG_DC_LUT_RW_INDEX,
+                                 rex::memory::Reinterpret<uint32_t>(new_gamma_ramp_rw_index));
+      }
+      if (write_gamma_ramp_component) {
+        OnGammaRampPWLValueWritten();
+      }
+    } break;
+
+    case XE_GPU_REG_DC_LUT_30_COLOR: {
+      assert_zero(regs[XE_GPU_REG_DC_LUT_RW_MODE] & 0b1);
+      auto gamma_ramp_rw_index = regs.Get<reg::DC_LUT_RW_INDEX>();
+      uint32_t gamma_ramp_write_enable_mask = regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] & 0b111;
+      if (gamma_ramp_write_enable_mask) {
+        reg::DC_LUT_30_COLOR& gamma_ramp_entry =
+            gamma_ramp_256_entry_table_[gamma_ramp_rw_index.rw_index];
+        auto gamma_ramp_value = regs.Get<reg::DC_LUT_30_COLOR>();
+        if (gamma_ramp_write_enable_mask & 0b001) {
+          gamma_ramp_entry.color_10_blue = gamma_ramp_value.color_10_blue;
+        }
+        if (gamma_ramp_write_enable_mask & 0b010) {
+          gamma_ramp_entry.color_10_green = gamma_ramp_value.color_10_green;
+        }
+        if (gamma_ramp_write_enable_mask & 0b100) {
+          gamma_ramp_entry.color_10_red = gamma_ramp_value.color_10_red;
+        }
+      }
+      gamma_ramp_rw_component_ = 0;
+      reg::DC_LUT_RW_INDEX new_gamma_ramp_rw_index = gamma_ramp_rw_index;
+      ++new_gamma_ramp_rw_index.rw_index;
+      WriteRegisterForceinline(XE_GPU_REG_DC_LUT_RW_INDEX,
+                               rex::memory::Reinterpret<uint32_t>(new_gamma_ramp_rw_index));
+      if (gamma_ramp_write_enable_mask) {
+        OnGammaRamp256EntryTableValueWritten();
+      }
+    } break;
+  }
+}
+
+void D3D12CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  WriteRegisterForceinline(index, value);
 }
 
 void D3D12CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
                                                   uint32_t num_registers) {
-  if (!num_registers) {
-    return;
-  }
+  WriteRegisterRangeFromMem_WithKnownBound<0, static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      start_index, base, num_registers);
+}
 
-  uint32_t current_index = start_index;
-  uint32_t registers_remaining = num_registers;
-  auto write_regular = [&](uint32_t count) {
-    CommandProcessor::WriteRegistersFromMem(current_index, base, count);
-    current_index += count;
-    base += count;
-    registers_remaining -= count;
-  };
-  auto write_shader_constants = [&](uint32_t count) {
-    WriteShaderConstantsFromMem(current_index, base, count);
-    current_index += count;
-    base += count;
-    registers_remaining -= count;
-  };
-  auto write_fetch_constants = [&](uint32_t count) {
-    WriteFetchFromMem(current_index, base, count);
-    current_index += count;
-    base += count;
-    registers_remaining -= count;
-  };
-  auto write_bool_loop_constants = [&](uint32_t count) {
-    WriteBoolLoopFromMem(current_index, base, count);
-    current_index += count;
-    base += count;
-    registers_remaining -= count;
-  };
+void D3D12CommandProcessor::WritePossiblySpecialRegistersFromMem(uint32_t start_index,
+                                                                 uint32_t* base,
+                                                                 uint32_t num_registers) {
+  uint32_t end_index = start_index + num_registers;
+  for (uint32_t index = start_index; index < end_index; ++index, ++base) {
+    uint32_t value = memory::load_and_swap<uint32_t>(base);
+    const_cast<volatile uint32_t&>(register_file_->values[index]) = value;
 
-  while (registers_remaining) {
-    if (current_index < XE_GPU_REG_SHADER_CONSTANT_000_X) {
-      write_regular(
-          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_000_X - current_index));
-    } else if (current_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
-      write_shader_constants(
-          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 - current_index));
-    } else if (current_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
-               current_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
-      write_fetch_constants(
-          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 + 1 - current_index));
-    } else if (current_index < XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031) {
-      write_regular(
-          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 - current_index));
-    } else if (current_index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
-      write_bool_loop_constants(
-          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1 - current_index));
-    } else {
-      write_regular(registers_remaining);
+    bool special = (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) ||
+                   index == XE_GPU_REG_COHER_STATUS_HOST ||
+                   (index >= XE_GPU_REG_DC_LUT_RW_INDEX && index <= XE_GPU_REG_DC_LUT_30_COLOR);
+    if (special) {
+      HandleSpecialRegisterWriteFast(index, value);
     }
   }
 }
 
+template <uint32_t register_lower_bound, uint32_t register_upper_bound>
+void D3D12CommandProcessor::WriteRegisterRangeFromMem_WithKnownBound(uint32_t start_index,
+                                                                     uint32_t* base,
+                                                                     uint32_t num_registers) {
+  if (!num_registers) {
+    return;
+  }
+
+  constexpr uint32_t kRegisterFileCount = static_cast<uint32_t>(RegisterFile::kRegisterCount);
+  if (start_index >= kRegisterFileCount) {
+    CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+    return;
+  }
+
+  uint32_t optimized_registers = std::min(num_registers, kRegisterFileCount - start_index);
+  uint32_t end_index = start_index + optimized_registers;
+  uint32_t current_index = start_index;
+
+  auto advance = [&](uint32_t count) {
+    current_index += count;
+    base += count;
+  };
+  auto write_regular_until = [&](uint32_t range_end) {
+    uint32_t write_end = std::min(end_index, range_end);
+    if (current_index < write_end) {
+      uint32_t count = write_end - current_index;
+      memory::copy_and_swap_32_unaligned(register_file_->values + current_index, base, count);
+      advance(count);
+    }
+  };
+  auto write_special_until = [&](uint32_t range_end) {
+    uint32_t write_end = std::min(end_index, range_end);
+    if (current_index < write_end) {
+      uint32_t count = write_end - current_index;
+      WritePossiblySpecialRegistersFromMem(current_index, base, count);
+      advance(count);
+    }
+  };
+  auto write_shader_constants_until = [&](uint32_t range_end) {
+    uint32_t write_end = std::min(end_index, range_end);
+    if (current_index < write_end) {
+      uint32_t count = write_end - current_index;
+      WriteShaderConstantsFromMem(current_index, base, count);
+      advance(count);
+    }
+  };
+  auto write_fetch_until = [&](uint32_t range_end) {
+    uint32_t write_end = std::min(end_index, range_end);
+    if (current_index < write_end) {
+      uint32_t count = write_end - current_index;
+      WriteFetchFromMem(current_index, base, count);
+      advance(count);
+    }
+  };
+  auto write_bool_loop_until = [&](uint32_t range_end) {
+    uint32_t write_end = std::min(end_index, range_end);
+    if (current_index < write_end) {
+      uint32_t count = write_end - current_index;
+      WriteBoolLoopFromMem(current_index, base, count);
+      advance(count);
+    }
+  };
+
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound, 0,
+                                         XE_GPU_REG_SCRATCH_REG0>()) {
+    write_regular_until(XE_GPU_REG_SCRATCH_REG0);
+  }
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound,
+                                         XE_GPU_REG_SCRATCH_REG0,
+                                         XE_GPU_REG_DC_LUT_30_COLOR + 1>()) {
+    write_special_until(XE_GPU_REG_DC_LUT_30_COLOR + 1);
+  }
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound,
+                                         XE_GPU_REG_DC_LUT_30_COLOR + 1,
+                                         XE_GPU_REG_SHADER_CONSTANT_000_X>()) {
+    write_regular_until(XE_GPU_REG_SHADER_CONSTANT_000_X);
+  }
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound,
+                                         XE_GPU_REG_SHADER_CONSTANT_000_X,
+                                         XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0>()) {
+    write_shader_constants_until(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0);
+  }
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound,
+                                         XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0,
+                                         XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 + 1>()) {
+    write_fetch_until(XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 + 1);
+  }
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound,
+                                         XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 + 1,
+                                         XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031>()) {
+    write_regular_until(XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031);
+  }
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound,
+                                         XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031,
+                                         XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1>()) {
+    write_bool_loop_until(XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1);
+  }
+  if constexpr (RegisterBoundsMayOverlap<register_lower_bound, register_upper_bound,
+                                         XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1,
+                                         kRegisterFileCount>()) {
+    write_regular_until(kRegisterFileCount);
+  }
+
+  // Keep malformed/overlong packets correct even if they exceed the static
+  // bounds supplied by the typed PM4 helper.
+  if (current_index < end_index) {
+    uint32_t count = end_index - current_index;
+    CommandProcessor::WriteRegistersFromMem(current_index, base, count);
+    advance(count);
+  }
+
+  if (optimized_registers != num_registers) {
+    CommandProcessor::WriteRegistersFromMem(start_index + optimized_registers, base,
+                                            num_registers - optimized_registers);
+  }
+}
+
+void D3D12CommandProcessor::WriteRegisterRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                                       uint32_t num_registers) {
+  memory::RingBuffer::ReadRange range = ring->BeginRead(size_t(num_registers) * sizeof(uint32_t));
+  if (!range.second) {
+    PrefetchReadRange(range.first, range.first_length);
+    WriteRegisterRangeFromMem_WithKnownBound<0,
+                                             static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+        base, reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(range.first)), num_registers);
+    ring->EndRead(range);
+    return;
+  }
+  WriteRegisterRangeFromRing_WraparoundCase(ring, base, num_registers);
+}
+
+template <uint32_t register_lower_bound, uint32_t register_upper_bound>
+void D3D12CommandProcessor::WriteRegisterRangeFromRing_WithKnownBound(memory::RingBuffer* ring,
+                                                                      uint32_t base,
+                                                                      uint32_t num_registers) {
+  memory::RingBuffer::ReadRange range = ring->BeginRead(size_t(num_registers) * sizeof(uint32_t));
+  if (!range.second) {
+    PrefetchReadRange(range.first, range.first_length);
+    WriteRegisterRangeFromMem_WithKnownBound<register_lower_bound, register_upper_bound>(
+        base, reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(range.first)), num_registers);
+    ring->EndRead(range);
+    return;
+  }
+  WriteRegisterRangeFromRing_WraparoundCase(ring, base, num_registers);
+}
+
+void D3D12CommandProcessor::WriteRegisterRangeFromRing_WraparoundCase(memory::RingBuffer* ring,
+                                                                      uint32_t base,
+                                                                      uint32_t num_registers) {
+  memory::RingBuffer::ReadRange range = ring->BeginRead(size_t(num_registers) * sizeof(uint32_t));
+  uint32_t first_count = uint32_t(range.first_length / sizeof(uint32_t));
+  PrefetchReadRange(range.first, range.first_length);
+  PrefetchReadRange(range.second, range.second_length);
+  WriteRegisterRangeFromMem_WithKnownBound<0, static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      base, reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(range.first)), first_count);
+  if (range.second_length) {
+    WriteRegisterRangeFromMem_WithKnownBound<0,
+                                             static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+        base + first_count, reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(range.second)),
+        num_registers - first_count);
+  }
+  ring->EndRead(range);
+}
+
+void D3D12CommandProcessor::WriteOneRegisterFromRing(memory::RingBuffer* ring, uint32_t base,
+                                                     uint32_t num_registers) {
+  memory::RingBuffer::ReadRange range = ring->BeginRead(size_t(num_registers) * sizeof(uint32_t));
+  PrefetchReadRange(range.first, range.first_length);
+  PrefetchReadRange(range.second, range.second_length);
+  uint32_t first_count = uint32_t(range.first_length / sizeof(uint32_t));
+  for (uint32_t i = 0; i < first_count; ++i) {
+    WriteRegisterForceinline(base, memory::load_and_swap<uint32_t>(range.first + i * 4));
+  }
+  uint32_t second_count = uint32_t(range.second_length / sizeof(uint32_t));
+  for (uint32_t i = 0; i < second_count; ++i) {
+    WriteRegisterForceinline(base, memory::load_and_swap<uint32_t>(range.second + i * 4));
+  }
+  ring->EndRead(range);
+}
+
 void D3D12CommandProcessor::WriteALURangeFromRing(memory::RingBuffer* ring, uint32_t base,
                                                   uint32_t num_registers) {
-  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_000_X, num_registers);
+  WriteRegisterRangeFromRing_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_000_X,
+                                            XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0>(
+      ring, base + XE_GPU_REG_SHADER_CONSTANT_000_X, num_registers);
 }
 
 void D3D12CommandProcessor::WriteFetchRangeFromRing(memory::RingBuffer* ring, uint32_t base,
                                                     uint32_t num_registers) {
-  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, num_registers);
+  WriteRegisterRangeFromRing_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0,
+                                            static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      ring, base + XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, num_registers);
 }
 
 void D3D12CommandProcessor::WriteBoolRangeFromRing(memory::RingBuffer* ring, uint32_t base,
                                                    uint32_t num_registers) {
-  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, num_registers);
+  WriteRegisterRangeFromRing_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031,
+                                            static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      ring, base + XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, num_registers);
 }
 
 void D3D12CommandProcessor::WriteLoopRangeFromRing(memory::RingBuffer* ring, uint32_t base,
                                                    uint32_t num_registers) {
-  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_LOOP_00, num_registers);
+  WriteRegisterRangeFromRing_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_LOOP_00,
+                                            static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      ring, base + XE_GPU_REG_SHADER_CONSTANT_LOOP_00, num_registers);
 }
 
 void D3D12CommandProcessor::WriteREGISTERSRangeFromRing(memory::RingBuffer* ring, uint32_t base,
                                                         uint32_t num_registers) {
-  WriteRegisterRangeFromRing(ring, base + 0x2000, num_registers);
+  WriteRegisterRangeFromRing_WithKnownBound<0x2000, 0x2800>(ring, base + 0x2000, num_registers);
 }
 
 void D3D12CommandProcessor::WriteALURangeFromMem(uint32_t start_index, uint32_t* base,
                                                  uint32_t num_registers) {
-  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_000_X, base, num_registers);
+  WriteRegisterRangeFromMem_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_000_X,
+                                           XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0>(
+      start_index + XE_GPU_REG_SHADER_CONSTANT_000_X, base, num_registers);
 }
 
 void D3D12CommandProcessor::WriteFetchRangeFromMem(uint32_t start_index, uint32_t* base,
                                                    uint32_t num_registers) {
-  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, base, num_registers);
+  WriteRegisterRangeFromMem_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0,
+                                           static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      start_index + XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, base, num_registers);
 }
 
 void D3D12CommandProcessor::WriteBoolRangeFromMem(uint32_t start_index, uint32_t* base,
                                                   uint32_t num_registers) {
-  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, base, num_registers);
+  WriteRegisterRangeFromMem_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031,
+                                           static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      start_index + XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, base, num_registers);
 }
 
 void D3D12CommandProcessor::WriteLoopRangeFromMem(uint32_t start_index, uint32_t* base,
                                                   uint32_t num_registers) {
-  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_LOOP_00, base, num_registers);
+  WriteRegisterRangeFromMem_WithKnownBound<XE_GPU_REG_SHADER_CONSTANT_LOOP_00,
+                                           static_cast<uint32_t>(RegisterFile::kRegisterCount)>(
+      start_index + XE_GPU_REG_SHADER_CONSTANT_LOOP_00, base, num_registers);
 }
 
 void D3D12CommandProcessor::WriteREGISTERSRangeFromMem(uint32_t start_index, uint32_t* base,
                                                        uint32_t num_registers) {
-  WriteRegistersFromMem(start_index + 0x2000, base, num_registers);
+  WriteRegisterRangeFromMem_WithKnownBound<0x2000, 0x2800>(start_index + 0x2000, base,
+                                                           num_registers);
 }
 
 void D3D12CommandProcessor::WriteShaderConstantsFromMem(uint32_t start_index, uint32_t* base,

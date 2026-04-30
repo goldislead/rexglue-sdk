@@ -211,8 +211,23 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool SetupContext() override;
   void ShutdownContext() override;
 
+  void WriteRegisterForceinline(uint32_t index, uint32_t value);
+  void HandleSpecialRegisterWriteFast(uint32_t index, uint32_t value);
   void WriteRegister(uint32_t index, uint32_t value) override;
   void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
+  void WritePossiblySpecialRegistersFromMem(uint32_t start_index, uint32_t* base,
+                                            uint32_t num_registers);
+  template <uint32_t register_lower_bound, uint32_t register_upper_bound>
+  void WriteRegisterRangeFromMem_WithKnownBound(uint32_t start_index, uint32_t* base,
+                                                uint32_t num_registers);
+  void WriteRegisterRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                  uint32_t num_registers) override;
+  template <uint32_t register_lower_bound, uint32_t register_upper_bound>
+  void WriteRegisterRangeFromRing_WithKnownBound(memory::RingBuffer* ring, uint32_t base,
+                                                 uint32_t num_registers);
+  void WriteRegisterRangeFromRing_WraparoundCase(memory::RingBuffer* ring, uint32_t base,
+                                                 uint32_t num_registers);
+  void WriteOneRegisterFromRing(memory::RingBuffer* ring, uint32_t base, uint32_t num_registers);
   void WriteALURangeFromRing(memory::RingBuffer* ring, uint32_t base,
                              uint32_t num_registers) override;
   void WriteFetchRangeFromRing(memory::RingBuffer* ring, uint32_t base,
