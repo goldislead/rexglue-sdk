@@ -3276,6 +3276,9 @@ void VulkanTextureCache::GetTextureUsageMasks(VulkanTexture::Usage usage,
   layout = VK_IMAGE_LAYOUT_UNDEFINED;
   switch (usage) {
     case VulkanTexture::Usage::kUndefined:
+      // For UNDEFINED layout, use TOP_OF_PIPE as source stage (wait for
+      // nothing) with no access mask (discarding old contents is valid).
+      stage_mask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
       break;
     case VulkanTexture::Usage::kTransferDestination:
       stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
