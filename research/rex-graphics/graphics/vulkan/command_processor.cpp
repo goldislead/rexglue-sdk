@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -598,6 +600,37 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
 
 VulkanCommandProcessor::~VulkanCommandProcessor() = default;
 
+void VulkanCommandProcessor::PushDebugMarker(const char* format, ...) {
+  if (!debug_markers_enabled_) {
+    return;
+  }
+  char label[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(label, sizeof(label), format, args);
+  va_end(args);
+  deferred_command_buffer_.CmdVkBeginDebugUtilsLabelEXT(label);
+}
+
+void VulkanCommandProcessor::PopDebugMarker() {
+  if (!debug_markers_enabled_) {
+    return;
+  }
+  deferred_command_buffer_.CmdVkEndDebugUtilsLabelEXT();
+}
+
+void VulkanCommandProcessor::InsertDebugMarker(const char* format, ...) {
+  if (!debug_markers_enabled_) {
+    return;
+  }
+  char label[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(label, sizeof(label), format, args);
+  va_end(args);
+  deferred_command_buffer_.CmdVkInsertDebugUtilsLabelEXT(label);
+}
+
 void VulkanCommandProcessor::ClearCaches() {
   CommandProcessor::ClearCaches();
   InvalidateAllVertexBufferResidency();
@@ -608,6 +641,11 @@ void VulkanCommandProcessor::InvalidateGpuMemory() {
   if (shared_memory_) {
     shared_memory_->InvalidateAllPages();
   }
+}
+
+void VulkanCommandProcessor::ClearReadbackBuffers() {
+  readback_buffers_.clear();
+  memexport_readback_buffers_.clear();
 }
 
 void VulkanCommandProcessor::InvalidateAllVertexBufferResidency() {
@@ -658,71 +696,6 @@ void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   render_target_cache_->RestoreEdramSnapshot(snapshot);
 }
 
-bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
-                                                                uint32_t packet, uint32_t count) {
-  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
-    return CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
-  }
-
-  const uint32_t kQueryFinished = rex::byte_swap(0xFFFFFEED);
-  assert_true(count == 1);
-  uint32_t initiator = reader->ReadAndSwap<uint32_t>();
-  WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
-
-  uint32_t sample_count_addr = register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
-  auto* sample_counts =
-      memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(sample_count_addr);
-  if (!sample_counts) {
-    DisableHostOcclusionQueries();
-    return true;
-  }
-
-  auto write_fallback_result = [sample_counts]() -> bool {
-    auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
-    if (fake_sample_count < 0) {
-      return true;
-    }
-    bool is_end_via_z_pass =
-        sample_counts->ZPass_A == kQueryFinished && sample_counts->ZPass_B == kQueryFinished;
-    bool is_end_via_z_fail =
-        sample_counts->ZFail_A == kQueryFinished && sample_counts->ZFail_B == kQueryFinished;
-    std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));
-    if (is_end_via_z_pass || is_end_via_z_fail) {
-      sample_counts->ZPass_A = fake_sample_count;
-      sample_counts->Total_A = fake_sample_count;
-    }
-    return true;
-  };
-
-  bool is_end_via_z_pass =
-      sample_counts->ZPass_A == kQueryFinished && sample_counts->ZPass_B == kQueryFinished;
-  bool is_end_via_z_fail =
-      sample_counts->ZFail_A == kQueryFinished && sample_counts->ZFail_B == kQueryFinished;
-  bool is_end = is_end_via_z_pass || is_end_via_z_fail;
-
-  if (!is_end) {
-    if (active_occlusion_query_.valid &&
-        active_occlusion_query_.sample_count_address != sample_count_addr) {
-      DisableHostOcclusionQueries();
-      return write_fallback_result();
-    }
-    if (!BeginGuestOcclusionQuery(sample_count_addr)) {
-      return write_fallback_result();
-    }
-    return true;
-  }
-
-  if (!active_occlusion_query_.valid ||
-      active_occlusion_query_.sample_count_address != sample_count_addr) {
-    DisableHostOcclusionQueries();
-    return write_fallback_result();
-  }
-
-  if (!EndGuestOcclusionQuery(sample_count_addr)) {
-    return write_fallback_result();
-  }
-  return true;
-}
 
 std::string VulkanCommandProcessor::GetWindowTitleText() const {
   std::ostringstream title;
@@ -786,6 +759,7 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize base command processor context");
     return false;
   }
+  debug_markers_enabled_ = IsGpuDebugMarkersEnabled();
   InvalidateAllVertexBufferResidency();
 
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
@@ -1036,6 +1010,8 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_ERROR("Failed to initialize the texture cache");
     return false;
   }
+  zpd_draw_resolution_scale_x_ = draw_resolution_scale_x;
+  zpd_draw_resolution_scale_y_ = draw_resolution_scale_y;
 
   // Shared memory and EDRAM common bindings.
   VkDescriptorPoolSize descriptor_pool_sizes[1];
@@ -1901,7 +1877,8 @@ bool VulkanCommandProcessor::SetupContext() {
     REXGPU_WARN("Failed to create Vulkan resolve-downscale pipeline layout");
   }
 
-  occlusion_query_resources_available_ = InitializeOcclusionQueryResources();
+  zpd_host_query_pool_ = std::make_unique<VulkanZPDQueryPool>();
+  EnsureZPDQueryResources();
 
   // Just not to expose uninitialized memory.
   std::memset(&system_constants_, 0, sizeof(system_constants_));
@@ -1912,7 +1889,8 @@ bool VulkanCommandProcessor::SetupContext() {
 void VulkanCommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
   InvalidateAllVertexBufferResidency();
-  ShutdownOcclusionQueryResources();
+  // ZPD query resources are shut down via CommandProcessor::ShutdownContext()
+  // which calls ShutdownZPDQueryResources() and ResetZPDState().
 
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -3120,6 +3098,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   }
 
   if (in_render_pass_) {
+    // Close any open ZPD segment before ending the current render pass.
+    CloseQuerySegment();
     if (use_dynamic_rendering) {
       deferred_command_buffer_.CmdVkEndRendering();
     } else {
@@ -3172,6 +3152,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
                                                   VK_SUBPASS_CONTENTS_INLINE);
   }
   in_render_pass_ = true;
+  // Try to open a pending ZPD segment now that we're inside a render pass.
+  OpenQuerySegment(false);
 }
 
 void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
@@ -3194,6 +3176,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   }
 
   if (in_render_pass_) {
+    CloseQuerySegment();
     if (use_dynamic_rendering) {
       deferred_command_buffer_.CmdVkEndRendering();
     } else {
@@ -3264,6 +3247,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
                                                   VK_SUBPASS_CONTENTS_INLINE);
   }
   in_render_pass_ = true;
+  OpenQuerySegment(false);
 }
 
 void VulkanCommandProcessor::EndRenderPass() {
@@ -3271,6 +3255,9 @@ void VulkanCommandProcessor::EndRenderPass() {
   if (!in_render_pass_) {
     return;
   }
+  // Close any open ZPD query before ending the render pass (vkCmdEndQuery must
+  // be inside the same render pass as vkCmdBeginQuery for occlusion queries).
+  CloseQuerySegment();
   if (current_render_pass_ == VK_NULL_HANDLE) {
     deferred_command_buffer_.CmdVkEndRendering();
   } else {
@@ -3589,6 +3576,11 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
 }
 
 void VulkanCommandProcessor::OnPrimaryBufferEnd() {
+  // Pump completed ZPD resolves and any pending strict-mode retires now,
+  // since the guest is likely about to poll for results.
+  PumpQueryResolves();
+  PumpPendingRetire();
+
   if (REXCVAR_GET(vulkan_submit_on_primary_buffer_end) && submission_open_ &&
       CanEndSubmissionImmediately()) {
     EndSubmission(false);
@@ -4743,217 +4735,247 @@ void VulkanCommandProcessor::EvictOldReadbackBuffers(
   }
 }
 
-bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
-  active_occlusion_query_ = {};
-  occlusion_query_cursor_ = 0;
-  occlusion_query_resources_available_ = false;
-  occlusion_query_pool_ = VK_NULL_HANDLE;
-  occlusion_query_readback_buffer_ = VK_NULL_HANDLE;
-  occlusion_query_readback_memory_ = VK_NULL_HANDLE;
-  occlusion_query_readback_memory_type_ = UINT32_MAX;
-  occlusion_query_readback_memory_size_ = 0;
-  occlusion_query_readback_mapping_ = nullptr;
-
-  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
-  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  VkDevice device = vulkan_device->device();
-
-  VkQueryPoolCreateInfo pool_info = {};
-  pool_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-  pool_info.queryType = VK_QUERY_TYPE_OCCLUSION;
-  pool_info.queryCount = kMaxOcclusionQueries;
-  if (dfn.vkCreateQueryPool(device, &pool_info, nullptr, &occlusion_query_pool_) != VK_SUCCESS) {
-    REXGPU_WARN(
-        "VulkanCommandProcessor: Failed to create occlusion query pool, using fake sample counts");
-    return false;
-  }
-
-  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
-          vulkan_device, sizeof(uint64_t) * kMaxOcclusionQueries, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          ui::vulkan::util::MemoryPurpose::kReadback, occlusion_query_readback_buffer_,
-          occlusion_query_readback_memory_, &occlusion_query_readback_memory_type_,
-          &occlusion_query_readback_memory_size_)) {
-    REXGPU_WARN(
-        "VulkanCommandProcessor: Failed to create occlusion query readback buffer, using fake "
-        "sample counts");
-    ShutdownOcclusionQueryResources();
-    return false;
-  }
-
-  if (dfn.vkMapMemory(device, occlusion_query_readback_memory_, 0, VK_WHOLE_SIZE, 0,
-                      reinterpret_cast<void**>(&occlusion_query_readback_mapping_)) != VK_SUCCESS) {
-    REXGPU_WARN(
-        "VulkanCommandProcessor: Failed to map occlusion query readback buffer, using fake sample "
-        "counts");
-    ShutdownOcclusionQueryResources();
-    return false;
-  }
-
-  occlusion_query_resources_available_ = true;
-  return true;
-}
-
-void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
-  DisableHostOcclusionQueries();
-
-  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
-  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  VkDevice device = vulkan_device->device();
-
-  if (occlusion_query_readback_mapping_ && occlusion_query_readback_memory_ != VK_NULL_HANDLE) {
-    dfn.vkUnmapMemory(device, occlusion_query_readback_memory_);
-  }
-  occlusion_query_readback_mapping_ = nullptr;
-  if (occlusion_query_readback_buffer_ != VK_NULL_HANDLE) {
-    dfn.vkDestroyBuffer(device, occlusion_query_readback_buffer_, nullptr);
-  }
-  if (occlusion_query_readback_memory_ != VK_NULL_HANDLE) {
-    dfn.vkFreeMemory(device, occlusion_query_readback_memory_, nullptr);
-  }
-  if (occlusion_query_pool_ != VK_NULL_HANDLE) {
-    dfn.vkDestroyQueryPool(device, occlusion_query_pool_, nullptr);
-  }
-
-  occlusion_query_pool_ = VK_NULL_HANDLE;
-  occlusion_query_readback_buffer_ = VK_NULL_HANDLE;
-  occlusion_query_readback_memory_ = VK_NULL_HANDLE;
-  occlusion_query_readback_memory_type_ = UINT32_MAX;
-  occlusion_query_readback_memory_size_ = 0;
-}
-
-bool VulkanCommandProcessor::AcquireOcclusionQueryIndex(uint32_t& host_index_out) {
-  if (occlusion_query_cursor_ >= kMaxOcclusionQueries) {
-    occlusion_query_cursor_ = 0;
-  }
-  host_index_out = occlusion_query_cursor_++;
-  return true;
-}
-
-void VulkanCommandProcessor::DisableHostOcclusionQueries() {
-  if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
-    if (BeginSubmission(true)) {
-      deferred_command_buffer_.CmdVkEndQuery(occlusion_query_pool_,
-                                             active_occlusion_query_.host_index);
-      EndSubmission(false);
-    }
-  }
-  active_occlusion_query_ = {};
-  occlusion_query_cursor_ = 0;
-  occlusion_query_resources_available_ = false;
-}
-
-bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_address) {
-  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_ ||
-      occlusion_query_pool_ == VK_NULL_HANDLE || occlusion_query_readback_mapping_ == nullptr) {
-    return false;
-  }
-  if (active_occlusion_query_.valid) {
-    REXGPU_WARN(
-        "VulkanCommandProcessor: Occlusion query begin issued while another query is active");
-    DisableHostOcclusionQueries();
-    return false;
-  }
-
-  uint32_t host_index = 0;
-  if (!AcquireOcclusionQueryIndex(host_index)) {
-    return false;
-  }
-  if (!BeginSubmission(true)) {
-    return false;
-  }
-
-  EndRenderPass();
-
-  DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-  command_buffer.CmdVkResetQueryPool(occlusion_query_pool_, host_index, 1);
-  command_buffer.CmdVkBeginQuery(occlusion_query_pool_, host_index, 0);
-  active_occlusion_query_.sample_count_address = sample_count_address;
-  active_occlusion_query_.host_index = host_index;
-  active_occlusion_query_.valid = true;
-  return true;
-}
-
-bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_address) {
-  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_ ||
-      !active_occlusion_query_.valid || occlusion_query_pool_ == VK_NULL_HANDLE ||
-      occlusion_query_readback_mapping_ == nullptr) {
-    return false;
-  }
-
-  uint32_t host_index = active_occlusion_query_.host_index;
-  active_occlusion_query_ = {};
-
-  if (!BeginSubmission(true)) {
-    return false;
-  }
-
-  EndRenderPass();
-
-  DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-  command_buffer.CmdVkEndQuery(occlusion_query_pool_, host_index);
-  command_buffer.CmdVkCopyQueryPoolResults(occlusion_query_pool_, host_index, 1,
-                                           occlusion_query_readback_buffer_,
-                                           sizeof(uint64_t) * host_index, sizeof(uint64_t),
-                                           VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-
-  if (!EndSubmission(false)) {
-    return false;
-  }
-  if (!AwaitAllQueueOperationsCompletion()) {
-    return false;
-  }
-
-  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
-  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  const VkDevice device = vulkan_device->device();
-  if (!(vulkan_device->memory_types().host_coherent &
-        (uint32_t(1) << occlusion_query_readback_memory_type_))) {
-    VkMappedMemoryRange memory_range = {};
-    memory_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-    memory_range.memory = occlusion_query_readback_memory_;
-    memory_range.offset = 0;
-    memory_range.size =
-        std::min(rex::round_up(VkDeviceSize(sizeof(uint64_t) * kMaxOcclusionQueries),
-                               vulkan_device->properties().nonCoherentAtomSize),
-                 occlusion_query_readback_memory_size_);
-    dfn.vkInvalidateMappedMemoryRanges(device, 1, &memory_range);
-  }
-
-  const uint64_t* results = reinterpret_cast<const uint64_t*>(occlusion_query_readback_mapping_);
-  uint64_t samples = NormalizeOcclusionSamples(results[host_index]);
-  WriteGuestOcclusionResult(sample_count_address, samples);
-  return true;
-}
-
-uint64_t VulkanCommandProcessor::NormalizeOcclusionSamples(uint64_t samples) const {
-  if (samples == 0 || !texture_cache_) {
-    return samples;
-  }
-  uint64_t scale_x = texture_cache_->draw_resolution_scale_x();
-  uint64_t scale_y = texture_cache_->draw_resolution_scale_y();
-  uint64_t scale = scale_x * scale_y;
-  if (scale <= 1) {
-    return samples;
-  }
-  return (samples + (scale >> 1)) / scale;
-}
-
-void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_address,
-                                                       uint64_t samples) {
-  auto* sample_counts =
-      memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(sample_count_address);
-  if (!sample_counts) {
+void VulkanCommandProcessor::EnsureZPDQueryResources() {
+  if (GetZPDMode() == ZPDMode::kFake || !zpd_host_query_pool_) {
     return;
   }
-  uint32_t clamped = samples > uint64_t(UINT32_MAX) ? UINT32_MAX : uint32_t(samples);
-  sample_counts->Total_A = clamped;
-  sample_counts->Total_B = 0;
-  sample_counts->ZPass_A = clamped;
-  sample_counts->ZPass_B = 0;
-  sample_counts->ZFail_A = 0;
-  sample_counts->ZFail_B = 0;
-  sample_counts->StencilFail_A = 0;
-  sample_counts->StencilFail_B = 0;
+
+  bool can_recreate = !zpd_active_segment_.logical_active &&
+                      !zpd_active_segment_.segment_active &&
+                      !zpd_host_query_pool_->has_pending_resolve_batch() &&
+                      zpd_resolves_in_flight_.empty();
+  zpd_host_query_pool_->EnsureInitialized(GetVulkanDevice(), kZPDQueryPoolCapacity, can_recreate);
+}
+
+void VulkanCommandProcessor::ShutdownZPDQueryResources() {
+  if (zpd_host_query_pool_) {
+    zpd_host_query_pool_->Shutdown();
+  }
+  zpd_resolves_in_flight_.clear();
+  zpd_deferred_releases_.clear();
+  zpd_active_query_index_ = UINT32_MAX;
+  zpd_active_query_generation_ = 0;
+}
+
+bool VulkanCommandProcessor::IsZPDQueryPoolReady() const {
+  return zpd_host_query_pool_ && zpd_host_query_pool_->is_initialized();
+}
+
+bool VulkanCommandProcessor::CanOpenZPDQuery() const {
+  return in_render_pass_;
+}
+
+CommandProcessor::QueryOpenResult VulkanCommandProcessor::OpenZPDQuery(
+    ReportHandle report_handle, bool can_close_submission) {
+  if (!BeginSubmission(true)) {
+    return QueryOpenResult::kFailed;
+  }
+
+  if (!in_render_pass_) {
+    return QueryOpenResult::kDeferred;
+  }
+
+  bool retried_after_submission_flip = false;
+  while (true) {
+    bool is_pool_exhausted = !zpd_host_query_pool_->has_free_indices();
+
+    if (is_pool_exhausted) {
+      PumpQueryResolves();
+      is_pool_exhausted = !zpd_host_query_pool_->has_free_indices();
+    }
+
+    if (is_pool_exhausted && GetZPDMode() == ZPDMode::kFast) {
+      return QueryOpenResult::kPoolExhausted;
+    }
+
+    uint64_t wait_for = 0;
+    if (is_pool_exhausted && !zpd_resolves_in_flight_.empty()) {
+      wait_for = zpd_resolves_in_flight_.front().submission;
+    }
+
+    if (wait_for == 0) {
+      break;
+    }
+
+    if (submission_open_ && wait_for == GetCurrentSubmission()) {
+      if (retried_after_submission_flip || !can_close_submission ||
+          !CanEndSubmissionImmediately()) {
+        return QueryOpenResult::kDeferred;
+      }
+
+      VkRenderPass saved_render_pass = current_render_pass_;
+      const VulkanRenderTargetCache::Framebuffer* saved_framebuffer = current_framebuffer_;
+      EndRenderPass();
+      if (!EndSubmission(false)) {
+        return QueryOpenResult::kFailed;
+      }
+      if (!BeginSubmission(true)) {
+        return QueryOpenResult::kFailed;
+      }
+
+      SubmitBarriersAndEnterRenderTargetCacheRenderPass(saved_render_pass, saved_framebuffer);
+      if (!in_render_pass_) {
+        return QueryOpenResult::kDeferred;
+      }
+
+      retried_after_submission_flip = true;
+      continue;
+    }
+
+    uint64_t completed_submission = GetCompletedSubmission();
+    if (wait_for > completed_submission) {
+      if (REXCVAR_GET(occlusion_query_log)) {
+        REXGPU_INFO("ZPD: Stall awaiting submission={} completed_before={}", wait_for,
+                    completed_submission);
+      }
+      CheckSubmissionFenceAndDeviceLoss(wait_for);
+      PumpQueryResolves();
+    }
+
+    break;
+  }
+
+  if (!in_render_pass_) {
+    return QueryOpenResult::kDeferred;
+  }
+
+  if (!zpd_host_query_pool_->AcquireQueryIndex(zpd_active_query_index_,
+                                               zpd_active_query_generation_)) {
+    return QueryOpenResult::kFailed;
+  }
+
+  zpd_host_query_pool_->BeginQuery(deferred_command_buffer_, zpd_active_query_index_);
+  return QueryOpenResult::kOpened;
+}
+
+bool VulkanCommandProcessor::CloseZPDQuery(ReportHandle report_handle) {
+  if (!in_render_pass_) {
+    REXGPU_WARN("ZPD: Split segment requested outside render pass");
+    return false;
+  }
+
+  zpd_host_query_pool_->EndQuery(deferred_command_buffer_, zpd_active_query_index_);
+  zpd_host_query_pool_->QueueQueryResolve(zpd_active_query_index_);
+
+  PendingQueryResolve resolve;
+  resolve.submission = GetCurrentSubmission();
+  resolve.query_index = zpd_active_query_index_;
+  resolve.query_generation = zpd_active_query_generation_;
+  resolve.report_handle = report_handle;
+  zpd_resolves_in_flight_.push_back(resolve);
+
+  zpd_active_query_index_ = UINT32_MAX;
+  zpd_active_query_generation_ = 0;
+  return true;
+}
+
+bool VulkanCommandProcessor::DiscardZPDQuery() {
+  if (!in_render_pass_) {
+    REXGPU_WARN("ZPD: Discard segment requested outside render pass");
+    zpd_deferred_releases_.push_back(
+        {GetCurrentSubmission(), zpd_active_query_index_, zpd_active_query_generation_});
+    zpd_active_query_index_ = UINT32_MAX;
+    zpd_active_query_generation_ = 0;
+    return true;
+  }
+
+  zpd_host_query_pool_->EndQuery(deferred_command_buffer_, zpd_active_query_index_);
+  zpd_host_query_pool_->ReleaseQueryIndex(zpd_active_query_index_, zpd_active_query_generation_);
+  zpd_active_query_index_ = UINT32_MAX;
+  zpd_active_query_generation_ = 0;
+  return true;
+}
+
+void VulkanCommandProcessor::PumpQueryResolves() {
+  if (GetZPDMode() == ZPDMode::kFake || !zpd_host_query_pool_) {
+    return;
+  }
+
+  uint64_t completed = GetCompletedSubmission();
+  if (completed == 0) {
+    return;
+  }
+
+  while (!zpd_deferred_releases_.empty()) {
+    auto& entry = zpd_deferred_releases_.front();
+    if (entry.submission > completed) {
+      break;
+    }
+    zpd_host_query_pool_->ReleaseQueryIndex(entry.query_index, entry.query_generation);
+    zpd_deferred_releases_.pop_front();
+  }
+
+  if (!zpd_resolves_in_flight_.empty() &&
+      zpd_resolves_in_flight_.front().submission <= completed) {
+    zpd_host_query_pool_->InvalidateReadback();
+  }
+
+  while (!zpd_resolves_in_flight_.empty()) {
+    if (zpd_resolves_in_flight_.front().submission > completed) {
+      break;
+    }
+    PendingQueryResolve resolve = zpd_resolves_in_flight_.front();
+    zpd_resolves_in_flight_.pop_front();
+
+    if (zpd_host_query_pool_->GenerationMatches(resolve.query_index, resolve.query_generation)) {
+      uint64_t raw_samples =
+          zpd_host_query_pool_->GetQueryReadbackValue(resolve.query_index);
+      zpd_host_query_pool_->ReleaseQueryIndex(resolve.query_index, resolve.query_generation);
+      OnZPDQueryResolved(resolve.report_handle, raw_samples);
+    }
+  }
+}
+
+bool VulkanCommandProcessor::AwaitQueryResolve(ReportHandle report_handle) {
+  if (GetZPDMode() == ZPDMode::kFake) {
+    return false;
+  }
+  if (zpd_batch_fake_) {
+    return true;
+  }
+
+  PumpQueryResolves();
+
+  uint64_t wait_for = 0;
+  for (const auto& resolve : zpd_resolves_in_flight_) {
+    if (resolve.report_handle == report_handle) {
+      wait_for = resolve.submission;
+    }
+  }
+
+  if (wait_for == 0) {
+    auto it = logical_zpd_reports_.find(report_handle);
+    return it == logical_zpd_reports_.end() ||
+           (it->second.pending_segments == 0 && it->second.ended);
+  }
+
+  if (wait_for >= GetCurrentSubmission()) {
+    if (!submission_open_) {
+      return false;
+    }
+    if (!CanEndSubmissionImmediately()) {
+      // Async pipeline creation is in progress; cannot flush the submission
+      // right now. Strict mode retirement will retry on the next pump.
+      if (REXCVAR_GET(occlusion_query_log)) {
+        REXGPU_INFO("ZPD/Async: Cannot end submission, pipelines still creating");
+      }
+      return false;
+    }
+    EndRenderPass();
+    if (!EndSubmission(false)) {
+      return false;
+    }
+  }
+
+  if (wait_for > GetCompletedSubmission()) {
+    CheckSubmissionFenceAndDeviceLoss(wait_for);
+  }
+
+  PumpQueryResolves();
+
+  auto it = logical_zpd_reports_.find(report_handle);
+  return it == logical_zpd_reports_.end() ||
+         (it->second.pending_segments == 0 && it->second.ended);
 }
 
 void VulkanCommandProcessor::InitializeTrace() {
@@ -5076,6 +5098,8 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
   render_target_cache_->CompletedSubmissionUpdated();
 
   texture_cache_->CompletedSubmissionUpdated(submission_completed_);
+
+  PumpQueryResolves();
 
   // Destroy objects scheduled for destruction.
   while (!destroy_framebuffers_.empty()) {
@@ -5335,11 +5359,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   if (submission_open_) {
     assert_false(scratch_buffer_used_);
 
-    if (active_occlusion_query_.valid && occlusion_query_pool_ != VK_NULL_HANDLE) {
-      deferred_command_buffer_.CmdVkEndQuery(occlusion_query_pool_,
-                                             active_occlusion_query_.host_index);
-      active_occlusion_query_ = {};
-    }
+    // Close any open ZPD query segment at submission boundaries.
+    CloseQuerySegment();
 
     EndRenderPass();
 
@@ -5419,6 +5440,12 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       return false;
     }
     deferred_command_buffer_.Execute(command_buffer.buffer);
+
+    // Record ZPD query resolves after the deferred command buffer, before submit.
+    if (zpd_host_query_pool_) {
+      zpd_host_query_pool_->RecordResolveBatch(command_buffer.buffer);
+    }
+
     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
       REXGPU_ERROR("Failed to end a Vulkan command buffer");
       return false;

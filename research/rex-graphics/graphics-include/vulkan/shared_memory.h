@@ -55,6 +55,8 @@ class VulkanSharedMemory : public SharedMemory {
   void InitializeTraceCompleteDownloads();
 
  protected:
+  void ClearCache() override;
+
   bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                         uint32_t length_allocations) override;
 

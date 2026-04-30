@@ -33,6 +33,36 @@ REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
                     "like PIX and RenderDoc. Automatically enabled when "
                     "RenderDoc is detected.");
 
+REXCVAR_DEFINE_STRING(occlusion_query, "fake", "GPU",
+                      "Occlusion query mode.\n"
+                      " fake: Always write fake sample counts (safe default)\n"
+                      " fast: Real GPU queries with speculative cached writes\n"
+                      " strict: Real GPU queries, waits for writeback (may stall)")
+    .allowed({"fake", "fast", "strict"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(occlusion_query_log, false, "GPU",
+                    "Log ZPD occlusion query events for debugging")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(occlusion_query_fake_lower_threshold, 0, "GPU",
+                     "When >= 0, oscillate fake sample counts between this lower "
+                     "bound and occlusion_query_fake_upper_threshold. When < 0, "
+                     "disable writing fake results in the fallback path.")
+    .range(-1, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(occlusion_query_fake_upper_threshold, 1000, "GPU",
+                     "Upper bound for oscillating fake occlusion sample counts")
+    .range(0, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_DOUBLE(occlusion_query_sample_count_saturation, 1.0, "GPU",
+                      "Saturate real occlusion sample counts to compress high values. "
+                      "1.0 = no saturation, 0.0 = clamp everything to 1.")
+    .range(0.0, 1.0)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 bool IsGpuDebugMarkersEnabled() {
   static bool cached = false;
   static bool result = false;

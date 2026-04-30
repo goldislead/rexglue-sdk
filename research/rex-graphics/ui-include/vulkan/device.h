@@ -168,6 +168,10 @@ class VulkanDevice {
     // VK_EXT_robustness2
 
     bool nullDescriptor = false;
+
+    // VK_EXT_host_query_reset (#261, promoted to 1.2)
+
+    bool hostQueryReset = false;
   };
 
   // Properties of the core API and enabled extensions, and enabled features.
@@ -190,6 +194,7 @@ class VulkanDevice {
     bool ext_1_1_KHR_sampler_ycbcr_conversion = false;  // #157
     bool ext_1_1_KHR_bind_memory2 = false;              // #158
     bool ext_1_2_KHR_spirv_1_4 = false;                 // #237
+    bool ext_1_2_EXT_host_query_reset = false;          // #261, promoted to 1.2
     bool ext_EXT_memory_budget = false;                 // #238
     // Has optional features not implied by this being true.
     bool ext_EXT_custom_border_color = false;
@@ -216,6 +221,8 @@ class VulkanDevice {
 #include <rex/ui/vulkan/functions/device_1_1_khr_get_memory_requirements2.inc>
     // VK_KHR_bind_memory2 (#158, promoted to 1.1)
 #include <rex/ui/vulkan/functions/device_1_1_khr_bind_memory2.inc>
+    // VK_EXT_host_query_reset (#261, promoted to 1.2)
+#include <rex/ui/vulkan/functions/device_1_2_ext_host_query_reset.inc>
     // VK_KHR_maintenance4 (#414, promoted to 1.3)
 #include <rex/ui/vulkan/functions/device_1_3_khr_maintenance4.inc>
     // VK_KHR_dynamic_rendering (#55, promoted to 1.3)

@@ -10,6 +10,7 @@
  */
 
 #include <cstdint>
+#include <mutex>
 
 #include <rex/assert.h>
 #include <rex/graphics/vulkan/shader.h>
@@ -31,6 +32,7 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
   if (!is_valid()) {
     return VK_NULL_HANDLE;
   }
+  std::lock_guard<std::mutex> lock(shader_module_mutex_);
   if (shader_module_ != VK_NULL_HANDLE) {
     return shader_module_;
   }
