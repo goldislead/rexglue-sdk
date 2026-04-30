@@ -4616,207 +4616,10 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       current_graphics_root_up_to_date_ &= ~(1u << kRootParameter_Bindless_DescriptorIndicesPixel);
     }
   } else {
-    //
-    // Bindful descriptors path.
-    //
-
-    // See what descriptors need to be updated.
-    // Samplers have already been checked.
-    bool write_textures_vertex =
-        texture_count_vertex && (!bindful_textures_written_vertex_ ||
-                                 current_texture_layout_uid_vertex_ != texture_layout_uid_vertex ||
-                                 !texture_cache_->AreActiveTextureSRVKeysUpToDate(
-                                     current_texture_srv_keys_vertex_.data(),
-                                     textures_vertex.data(), texture_count_vertex));
-    bool write_textures_pixel =
-        texture_count_pixel &&
-        (!bindful_textures_written_pixel_ ||
-         current_texture_layout_uid_pixel_ != texture_layout_uid_pixel ||
-         !texture_cache_->AreActiveTextureSRVKeysUpToDate(
-             current_texture_srv_keys_pixel_.data(), textures_pixel->data(), texture_count_pixel));
-    bool write_samplers_vertex = sampler_count_vertex && !bindful_samplers_written_vertex_;
-    bool write_samplers_pixel = sampler_count_pixel && !bindful_samplers_written_pixel_;
-    bool edram_rov_used =
-        render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
-
-    // Allocate the descriptors.
-    size_t view_count_partial_update = 0;
-    if (write_textures_vertex) {
-      view_count_partial_update += texture_count_vertex;
-    }
-    if (write_textures_pixel) {
-      view_count_partial_update += texture_count_pixel;
-    }
-    // Shared memory SRV and null UAV + null SRV and shared memory UAV +
-    // textures.
-    size_t view_count_full_update = 4 + texture_count_vertex + texture_count_pixel;
-    if (edram_rov_used) {
-      // + EDRAM UAV and ZPD counter UAV in two tables.
-      view_count_full_update += 4;
-    }
-    D3D12_CPU_DESCRIPTOR_HANDLE view_cpu_handle;
-    D3D12_GPU_DESCRIPTOR_HANDLE view_gpu_handle;
-    uint32_t descriptor_size_view = provider.GetViewDescriptorSize();
-    uint64_t view_heap_index = RequestViewBindfulDescriptors(
-        draw_view_bindful_heap_index_, uint32_t(view_count_partial_update),
-        uint32_t(view_count_full_update), view_cpu_handle, view_gpu_handle);
-    if (view_heap_index == ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid) {
-      REXGPU_ERROR("Failed to allocate view descriptors");
+    if (!UpdateBindings_BindfulPath(texture_layout_uid_vertex, textures_vertex,
+                                    texture_layout_uid_pixel, textures_pixel, sampler_count_vertex,
+                                    sampler_count_pixel)) {
       return false;
-    }
-    size_t sampler_count_partial_update = 0;
-    if (write_samplers_vertex) {
-      sampler_count_partial_update += sampler_count_vertex;
-    }
-    if (write_samplers_pixel) {
-      sampler_count_partial_update += sampler_count_pixel;
-    }
-    D3D12_CPU_DESCRIPTOR_HANDLE sampler_cpu_handle = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu_handle = {};
-    uint32_t descriptor_size_sampler = provider.GetSamplerDescriptorSize();
-    uint64_t sampler_heap_index = ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid;
-    if (sampler_count_vertex != 0 || sampler_count_pixel != 0) {
-      sampler_heap_index = RequestSamplerBindfulDescriptors(
-          draw_sampler_bindful_heap_index_, uint32_t(sampler_count_partial_update),
-          uint32_t(sampler_count_vertex + sampler_count_pixel), sampler_cpu_handle,
-          sampler_gpu_handle);
-      if (sampler_heap_index == ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid) {
-        REXGPU_ERROR("Failed to allocate sampler descriptors");
-        return false;
-      }
-    }
-    if (draw_view_bindful_heap_index_ != view_heap_index) {
-      // Need to update all view descriptors.
-      write_textures_vertex = texture_count_vertex != 0;
-      write_textures_pixel = texture_count_pixel != 0;
-      bindful_textures_written_vertex_ = false;
-      bindful_textures_written_pixel_ = false;
-      // If updating fully, write the shared memory SRV and UAV descriptors and,
-      // if needed, the EDRAM and ZPD counter descriptors.
-      // SRV + null UAV + EDRAM + ZPD counter.
-      gpu_handle_shared_memory_srv_and_edram_ = view_gpu_handle;
-      shared_memory_->WriteRawSRVDescriptor(view_cpu_handle);
-      view_cpu_handle.ptr += descriptor_size_view;
-      view_gpu_handle.ptr += descriptor_size_view;
-      ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle, nullptr, 0);
-      view_cpu_handle.ptr += descriptor_size_view;
-      view_gpu_handle.ptr += descriptor_size_view;
-      if (edram_rov_used) {
-        render_target_cache_->WriteEdramUintPow2UAVDescriptor(view_cpu_handle, 2);
-        view_cpu_handle.ptr += descriptor_size_view;
-        view_gpu_handle.ptr += descriptor_size_view;
-        if (zpd_host_query_pool_ && zpd_host_query_pool_->rov_counter_initialized()) {
-          ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle,
-                                              zpd_host_query_pool_->rov_counter_buffer(),
-                                              sizeof(uint32_t) * zpd_host_query_pool_->capacity());
-        } else {
-          ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle, nullptr, 0);
-        }
-        view_cpu_handle.ptr += descriptor_size_view;
-        view_gpu_handle.ptr += descriptor_size_view;
-      }
-      // Null SRV + UAV + EDRAM + ZPD counter.
-      gpu_handle_shared_memory_uav_and_edram_ = view_gpu_handle;
-      ui::d3d12::util::CreateBufferRawSRV(device, view_cpu_handle, nullptr, 0);
-      view_cpu_handle.ptr += descriptor_size_view;
-      view_gpu_handle.ptr += descriptor_size_view;
-      shared_memory_->WriteRawUAVDescriptor(view_cpu_handle);
-      view_cpu_handle.ptr += descriptor_size_view;
-      view_gpu_handle.ptr += descriptor_size_view;
-      if (edram_rov_used) {
-        render_target_cache_->WriteEdramUintPow2UAVDescriptor(view_cpu_handle, 2);
-        view_cpu_handle.ptr += descriptor_size_view;
-        view_gpu_handle.ptr += descriptor_size_view;
-        if (zpd_host_query_pool_ && zpd_host_query_pool_->rov_counter_initialized()) {
-          ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle,
-                                              zpd_host_query_pool_->rov_counter_buffer(),
-                                              sizeof(uint32_t) * zpd_host_query_pool_->capacity());
-        } else {
-          ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle, nullptr, 0);
-        }
-        view_cpu_handle.ptr += descriptor_size_view;
-        view_gpu_handle.ptr += descriptor_size_view;
-      }
-      current_graphics_root_up_to_date_ &= ~(1u << kRootParameter_Bindful_SharedMemoryAndEdram);
-    }
-    if (sampler_heap_index != ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid &&
-        draw_sampler_bindful_heap_index_ != sampler_heap_index) {
-      write_samplers_vertex = sampler_count_vertex != 0;
-      write_samplers_pixel = sampler_count_pixel != 0;
-      bindful_samplers_written_vertex_ = false;
-      bindful_samplers_written_pixel_ = false;
-    }
-
-    // Write the descriptors.
-    if (write_textures_vertex) {
-      assert_true(current_graphics_root_bindful_extras_.textures_vertex !=
-                  RootBindfulExtraParameterIndices::kUnavailable);
-      gpu_handle_textures_vertex_ = view_gpu_handle;
-      for (size_t i = 0; i < texture_count_vertex; ++i) {
-        texture_cache_->WriteActiveTextureBindfulSRV(textures_vertex[i], view_cpu_handle);
-        view_cpu_handle.ptr += descriptor_size_view;
-        view_gpu_handle.ptr += descriptor_size_view;
-      }
-      current_texture_layout_uid_vertex_ = texture_layout_uid_vertex;
-      current_texture_srv_keys_vertex_.resize(
-          std::max(current_texture_srv_keys_vertex_.size(), size_t(texture_count_vertex)));
-      texture_cache_->WriteActiveTextureSRVKeys(current_texture_srv_keys_vertex_.data(),
-                                                textures_vertex.data(), texture_count_vertex);
-      bindful_textures_written_vertex_ = true;
-      current_graphics_root_up_to_date_ &=
-          ~(1u << current_graphics_root_bindful_extras_.textures_vertex);
-    }
-    if (write_textures_pixel) {
-      assert_true(current_graphics_root_bindful_extras_.textures_pixel !=
-                  RootBindfulExtraParameterIndices::kUnavailable);
-      gpu_handle_textures_pixel_ = view_gpu_handle;
-      for (size_t i = 0; i < texture_count_pixel; ++i) {
-        texture_cache_->WriteActiveTextureBindfulSRV((*textures_pixel)[i], view_cpu_handle);
-        view_cpu_handle.ptr += descriptor_size_view;
-        view_gpu_handle.ptr += descriptor_size_view;
-      }
-      current_texture_layout_uid_pixel_ = texture_layout_uid_pixel;
-      current_texture_srv_keys_pixel_.resize(
-          std::max(current_texture_srv_keys_pixel_.size(), size_t(texture_count_pixel)));
-      texture_cache_->WriteActiveTextureSRVKeys(current_texture_srv_keys_pixel_.data(),
-                                                textures_pixel->data(), texture_count_pixel);
-      bindful_textures_written_pixel_ = true;
-      current_graphics_root_up_to_date_ &=
-          ~(1u << current_graphics_root_bindful_extras_.textures_pixel);
-    }
-    if (write_samplers_vertex) {
-      assert_true(current_graphics_root_bindful_extras_.samplers_vertex !=
-                  RootBindfulExtraParameterIndices::kUnavailable);
-      gpu_handle_samplers_vertex_ = sampler_gpu_handle;
-      for (size_t i = 0; i < sampler_count_vertex; ++i) {
-        texture_cache_->WriteSampler(current_samplers_vertex_[i], sampler_cpu_handle);
-        sampler_cpu_handle.ptr += descriptor_size_sampler;
-        sampler_gpu_handle.ptr += descriptor_size_sampler;
-      }
-      // Current samplers have already been updated.
-      bindful_samplers_written_vertex_ = true;
-      current_graphics_root_up_to_date_ &=
-          ~(1u << current_graphics_root_bindful_extras_.samplers_vertex);
-    }
-    if (write_samplers_pixel) {
-      assert_true(current_graphics_root_bindful_extras_.samplers_pixel !=
-                  RootBindfulExtraParameterIndices::kUnavailable);
-      gpu_handle_samplers_pixel_ = sampler_gpu_handle;
-      for (size_t i = 0; i < sampler_count_pixel; ++i) {
-        texture_cache_->WriteSampler(current_samplers_pixel_[i], sampler_cpu_handle);
-        sampler_cpu_handle.ptr += descriptor_size_sampler;
-        sampler_gpu_handle.ptr += descriptor_size_sampler;
-      }
-      // Current samplers have already been updated.
-      bindful_samplers_written_pixel_ = true;
-      current_graphics_root_up_to_date_ &=
-          ~(1u << current_graphics_root_bindful_extras_.samplers_pixel);
-    }
-
-    // Wrote new descriptors on the current page.
-    draw_view_bindful_heap_index_ = view_heap_index;
-    if (sampler_heap_index != ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid) {
-      draw_sampler_bindful_heap_index_ = sampler_heap_index;
     }
   }
 
@@ -4891,37 +4694,250 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       current_graphics_root_up_to_date_ |= 1u << kRootParameter_Bindless_ViewHeap;
     }
   } else {
-    uint32_t extra_index;
-    extra_index = current_graphics_root_bindful_extras_.textures_pixel;
-    if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
-        !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
-      deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
-                                                               gpu_handle_textures_pixel_);
-      current_graphics_root_up_to_date_ |= 1u << extra_index;
-    }
-    extra_index = current_graphics_root_bindful_extras_.samplers_pixel;
-    if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
-        !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
-      deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
-                                                               gpu_handle_samplers_pixel_);
-      current_graphics_root_up_to_date_ |= 1u << extra_index;
-    }
-    extra_index = current_graphics_root_bindful_extras_.textures_vertex;
-    if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
-        !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
-      deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
-                                                               gpu_handle_textures_vertex_);
-      current_graphics_root_up_to_date_ |= 1u << extra_index;
-    }
-    extra_index = current_graphics_root_bindful_extras_.samplers_vertex;
-    if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
-        !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
-      deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
-                                                               gpu_handle_samplers_vertex_);
-      current_graphics_root_up_to_date_ |= 1u << extra_index;
-    }
+    UpdateBindings_UpdateRootBindful();
   }
 
+  return true;
+}
+
+void D3D12CommandProcessor::UpdateBindings_UpdateRootBindful() {
+  uint32_t extra_index;
+  extra_index = current_graphics_root_bindful_extras_.textures_pixel;
+  if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
+      !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
+    deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
+                                                             gpu_handle_textures_pixel_);
+    current_graphics_root_up_to_date_ |= 1u << extra_index;
+  }
+  extra_index = current_graphics_root_bindful_extras_.samplers_pixel;
+  if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
+      !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
+    deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
+                                                             gpu_handle_samplers_pixel_);
+    current_graphics_root_up_to_date_ |= 1u << extra_index;
+  }
+  extra_index = current_graphics_root_bindful_extras_.textures_vertex;
+  if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
+      !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
+    deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
+                                                             gpu_handle_textures_vertex_);
+    current_graphics_root_up_to_date_ |= 1u << extra_index;
+  }
+  extra_index = current_graphics_root_bindful_extras_.samplers_vertex;
+  if (extra_index != RootBindfulExtraParameterIndices::kUnavailable &&
+      !(current_graphics_root_up_to_date_ & (1u << extra_index))) {
+    deferred_command_list_.D3DSetGraphicsRootDescriptorTable(extra_index,
+                                                             gpu_handle_samplers_vertex_);
+    current_graphics_root_up_to_date_ |= 1u << extra_index;
+  }
+}
+
+bool D3D12CommandProcessor::UpdateBindings_BindfulPath(
+    size_t texture_layout_uid_vertex,
+    const std::vector<D3D12Shader::TextureBinding>& textures_vertex,
+    size_t texture_layout_uid_pixel, const std::vector<D3D12Shader::TextureBinding>* textures_pixel,
+    size_t sampler_count_vertex, size_t sampler_count_pixel) {
+  const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+  size_t texture_count_vertex = textures_vertex.size();
+  size_t texture_count_pixel = textures_pixel ? textures_pixel->size() : 0;
+
+  // See what descriptors need to be updated. Samplers have already been checked.
+  bool write_textures_vertex =
+      texture_count_vertex &&
+      (!bindful_textures_written_vertex_ ||
+       current_texture_layout_uid_vertex_ != texture_layout_uid_vertex ||
+       !texture_cache_->AreActiveTextureSRVKeysUpToDate(
+           current_texture_srv_keys_vertex_.data(), textures_vertex.data(), texture_count_vertex));
+  bool write_textures_pixel =
+      texture_count_pixel &&
+      (!bindful_textures_written_pixel_ ||
+       current_texture_layout_uid_pixel_ != texture_layout_uid_pixel ||
+       !texture_cache_->AreActiveTextureSRVKeysUpToDate(
+           current_texture_srv_keys_pixel_.data(), textures_pixel->data(), texture_count_pixel));
+  bool write_samplers_vertex = sampler_count_vertex && !bindful_samplers_written_vertex_;
+  bool write_samplers_pixel = sampler_count_pixel && !bindful_samplers_written_pixel_;
+  bool edram_rov_used =
+      render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
+
+  // Allocate the descriptors.
+  size_t view_count_partial_update = 0;
+  if (write_textures_vertex) {
+    view_count_partial_update += texture_count_vertex;
+  }
+  if (write_textures_pixel) {
+    view_count_partial_update += texture_count_pixel;
+  }
+  // Shared memory SRV and null UAV + null SRV and shared memory UAV + textures.
+  size_t view_count_full_update = 4 + texture_count_vertex + texture_count_pixel;
+  if (edram_rov_used) {
+    // + EDRAM UAV and ZPD counter UAV in two tables.
+    view_count_full_update += 4;
+  }
+  D3D12_CPU_DESCRIPTOR_HANDLE view_cpu_handle;
+  D3D12_GPU_DESCRIPTOR_HANDLE view_gpu_handle;
+  uint32_t descriptor_size_view = provider.GetViewDescriptorSize();
+  uint64_t view_heap_index = RequestViewBindfulDescriptors(
+      draw_view_bindful_heap_index_, uint32_t(view_count_partial_update),
+      uint32_t(view_count_full_update), view_cpu_handle, view_gpu_handle);
+  if (view_heap_index == ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid) {
+    REXGPU_ERROR("Failed to allocate view descriptors");
+    return false;
+  }
+  size_t sampler_count_partial_update = 0;
+  if (write_samplers_vertex) {
+    sampler_count_partial_update += sampler_count_vertex;
+  }
+  if (write_samplers_pixel) {
+    sampler_count_partial_update += sampler_count_pixel;
+  }
+  D3D12_CPU_DESCRIPTOR_HANDLE sampler_cpu_handle = {};
+  D3D12_GPU_DESCRIPTOR_HANDLE sampler_gpu_handle = {};
+  uint32_t descriptor_size_sampler = provider.GetSamplerDescriptorSize();
+  uint64_t sampler_heap_index = ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid;
+  if (sampler_count_vertex != 0 || sampler_count_pixel != 0) {
+    sampler_heap_index = RequestSamplerBindfulDescriptors(
+        draw_sampler_bindful_heap_index_, uint32_t(sampler_count_partial_update),
+        uint32_t(sampler_count_vertex + sampler_count_pixel), sampler_cpu_handle,
+        sampler_gpu_handle);
+    if (sampler_heap_index == ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid) {
+      REXGPU_ERROR("Failed to allocate sampler descriptors");
+      return false;
+    }
+  }
+  if (draw_view_bindful_heap_index_ != view_heap_index) {
+    // Need to update all view descriptors.
+    write_textures_vertex = texture_count_vertex != 0;
+    write_textures_pixel = texture_count_pixel != 0;
+    bindful_textures_written_vertex_ = false;
+    bindful_textures_written_pixel_ = false;
+    // If updating fully, write the shared memory SRV and UAV descriptors and,
+    // if needed, the EDRAM and ZPD counter descriptors.
+    // SRV + null UAV + EDRAM + ZPD counter.
+    gpu_handle_shared_memory_srv_and_edram_ = view_gpu_handle;
+    shared_memory_->WriteRawSRVDescriptor(view_cpu_handle);
+    view_cpu_handle.ptr += descriptor_size_view;
+    view_gpu_handle.ptr += descriptor_size_view;
+    ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle, nullptr, 0);
+    view_cpu_handle.ptr += descriptor_size_view;
+    view_gpu_handle.ptr += descriptor_size_view;
+    if (edram_rov_used) {
+      render_target_cache_->WriteEdramUintPow2UAVDescriptor(view_cpu_handle, 2);
+      view_cpu_handle.ptr += descriptor_size_view;
+      view_gpu_handle.ptr += descriptor_size_view;
+      if (zpd_host_query_pool_ && zpd_host_query_pool_->rov_counter_initialized()) {
+        ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle,
+                                            zpd_host_query_pool_->rov_counter_buffer(),
+                                            sizeof(uint32_t) * zpd_host_query_pool_->capacity());
+      } else {
+        ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle, nullptr, 0);
+      }
+      view_cpu_handle.ptr += descriptor_size_view;
+      view_gpu_handle.ptr += descriptor_size_view;
+    }
+    // Null SRV + UAV + EDRAM + ZPD counter.
+    gpu_handle_shared_memory_uav_and_edram_ = view_gpu_handle;
+    ui::d3d12::util::CreateBufferRawSRV(device, view_cpu_handle, nullptr, 0);
+    view_cpu_handle.ptr += descriptor_size_view;
+    view_gpu_handle.ptr += descriptor_size_view;
+    shared_memory_->WriteRawUAVDescriptor(view_cpu_handle);
+    view_cpu_handle.ptr += descriptor_size_view;
+    view_gpu_handle.ptr += descriptor_size_view;
+    if (edram_rov_used) {
+      render_target_cache_->WriteEdramUintPow2UAVDescriptor(view_cpu_handle, 2);
+      view_cpu_handle.ptr += descriptor_size_view;
+      view_gpu_handle.ptr += descriptor_size_view;
+      if (zpd_host_query_pool_ && zpd_host_query_pool_->rov_counter_initialized()) {
+        ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle,
+                                            zpd_host_query_pool_->rov_counter_buffer(),
+                                            sizeof(uint32_t) * zpd_host_query_pool_->capacity());
+      } else {
+        ui::d3d12::util::CreateBufferRawUAV(device, view_cpu_handle, nullptr, 0);
+      }
+      view_cpu_handle.ptr += descriptor_size_view;
+      view_gpu_handle.ptr += descriptor_size_view;
+    }
+    current_graphics_root_up_to_date_ &= ~(1u << kRootParameter_Bindful_SharedMemoryAndEdram);
+  }
+  if (sampler_heap_index != ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid &&
+      draw_sampler_bindful_heap_index_ != sampler_heap_index) {
+    write_samplers_vertex = sampler_count_vertex != 0;
+    write_samplers_pixel = sampler_count_pixel != 0;
+    bindful_samplers_written_vertex_ = false;
+    bindful_samplers_written_pixel_ = false;
+  }
+
+  // Write the descriptors.
+  if (write_textures_vertex) {
+    assert_true(current_graphics_root_bindful_extras_.textures_vertex !=
+                RootBindfulExtraParameterIndices::kUnavailable);
+    gpu_handle_textures_vertex_ = view_gpu_handle;
+    for (size_t i = 0; i < texture_count_vertex; ++i) {
+      texture_cache_->WriteActiveTextureBindfulSRV(textures_vertex[i], view_cpu_handle);
+      view_cpu_handle.ptr += descriptor_size_view;
+      view_gpu_handle.ptr += descriptor_size_view;
+    }
+    current_texture_layout_uid_vertex_ = texture_layout_uid_vertex;
+    current_texture_srv_keys_vertex_.resize(
+        std::max(current_texture_srv_keys_vertex_.size(), size_t(texture_count_vertex)));
+    texture_cache_->WriteActiveTextureSRVKeys(current_texture_srv_keys_vertex_.data(),
+                                              textures_vertex.data(), texture_count_vertex);
+    bindful_textures_written_vertex_ = true;
+    current_graphics_root_up_to_date_ &=
+        ~(1u << current_graphics_root_bindful_extras_.textures_vertex);
+  }
+  if (write_textures_pixel) {
+    assert_true(current_graphics_root_bindful_extras_.textures_pixel !=
+                RootBindfulExtraParameterIndices::kUnavailable);
+    gpu_handle_textures_pixel_ = view_gpu_handle;
+    for (size_t i = 0; i < texture_count_pixel; ++i) {
+      texture_cache_->WriteActiveTextureBindfulSRV((*textures_pixel)[i], view_cpu_handle);
+      view_cpu_handle.ptr += descriptor_size_view;
+      view_gpu_handle.ptr += descriptor_size_view;
+    }
+    current_texture_layout_uid_pixel_ = texture_layout_uid_pixel;
+    current_texture_srv_keys_pixel_.resize(
+        std::max(current_texture_srv_keys_pixel_.size(), size_t(texture_count_pixel)));
+    texture_cache_->WriteActiveTextureSRVKeys(current_texture_srv_keys_pixel_.data(),
+                                              textures_pixel->data(), texture_count_pixel);
+    bindful_textures_written_pixel_ = true;
+    current_graphics_root_up_to_date_ &=
+        ~(1u << current_graphics_root_bindful_extras_.textures_pixel);
+  }
+  if (write_samplers_vertex) {
+    assert_true(current_graphics_root_bindful_extras_.samplers_vertex !=
+                RootBindfulExtraParameterIndices::kUnavailable);
+    gpu_handle_samplers_vertex_ = sampler_gpu_handle;
+    for (size_t i = 0; i < sampler_count_vertex; ++i) {
+      texture_cache_->WriteSampler(current_samplers_vertex_[i], sampler_cpu_handle);
+      sampler_cpu_handle.ptr += descriptor_size_sampler;
+      sampler_gpu_handle.ptr += descriptor_size_sampler;
+    }
+    // Current samplers have already been updated.
+    bindful_samplers_written_vertex_ = true;
+    current_graphics_root_up_to_date_ &=
+        ~(1u << current_graphics_root_bindful_extras_.samplers_vertex);
+  }
+  if (write_samplers_pixel) {
+    assert_true(current_graphics_root_bindful_extras_.samplers_pixel !=
+                RootBindfulExtraParameterIndices::kUnavailable);
+    gpu_handle_samplers_pixel_ = sampler_gpu_handle;
+    for (size_t i = 0; i < sampler_count_pixel; ++i) {
+      texture_cache_->WriteSampler(current_samplers_pixel_[i], sampler_cpu_handle);
+      sampler_cpu_handle.ptr += descriptor_size_sampler;
+      sampler_gpu_handle.ptr += descriptor_size_sampler;
+    }
+    // Current samplers have already been updated.
+    bindful_samplers_written_pixel_ = true;
+    current_graphics_root_up_to_date_ &=
+        ~(1u << current_graphics_root_bindful_extras_.samplers_pixel);
+  }
+
+  // Wrote new descriptors on the current page.
+  draw_view_bindful_heap_index_ = view_heap_index;
+  if (sampler_heap_index != ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid) {
+    draw_sampler_bindful_heap_index_ = sampler_heap_index;
+  }
   return true;
 }
 

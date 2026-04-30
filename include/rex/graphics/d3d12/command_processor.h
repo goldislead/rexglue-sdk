@@ -397,6 +397,12 @@ class D3D12CommandProcessor : public CommandProcessor {
                                   uint32_t normalized_color_mask);
   bool UpdateBindings(const D3D12Shader* vertex_shader, const D3D12Shader* pixel_shader,
                       ID3D12RootSignature* root_signature, bool shared_memory_is_uav);
+  void UpdateBindings_UpdateRootBindful();
+  bool UpdateBindings_BindfulPath(size_t texture_layout_uid_vertex,
+                                  const std::vector<D3D12Shader::TextureBinding>& textures_vertex,
+                                  size_t texture_layout_uid_pixel,
+                                  const std::vector<D3D12Shader::TextureBinding>* textures_pixel,
+                                  size_t sampler_count_vertex, size_t sampler_count_pixel);
   bool IssueCopy_ReadbackResolvePath();
   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
