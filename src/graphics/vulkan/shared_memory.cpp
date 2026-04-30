@@ -254,6 +254,10 @@ bool VulkanSharedMemory::InitializeTraceSubmitDownloads() {
   command_processor_.SubmitBarriers(true);
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
 
+  command_processor_.InsertDebugMarker("Trace Download: %u KB, %zu ranges",
+                                       download_page_count << page_size_log2() >> 10,
+                                       trace_download_ranges().size());
+
   size_t download_range_count = trace_download_ranges().size();
   VkBufferCopy* download_regions = command_buffer.CmdCopyBufferEmplace(
       buffer_, trace_download_buffer_, uint32_t(download_range_count));
@@ -359,7 +363,18 @@ bool VulkanSharedMemory::UploadRanges(
                      (upload_page_ranges.back().first + upload_page_ranges.back().second -
                       upload_page_ranges.front().first)
                          << page_size_log2()));
+  // Submit barriers (may end render pass) before pushing debug marker so
+  // EndRenderPass is not inside the SharedMem Upload marker.
   command_processor_.SubmitBarriers(true);
+  const uint32_t total_upload_bytes =
+      (upload_page_ranges.back().first + upload_page_ranges.back().second -
+       upload_page_ranges.front().first)
+      << page_size_log2();
+  command_processor_.PushDebugMarker(
+      "UploadRanges (SharedMem): 0x%08X-0x%08X (%u KB, %zu ranges)",
+      upload_page_ranges.front().first << page_size_log2(),
+      (upload_page_ranges.back().first + upload_page_ranges.back().second) << page_size_log2(),
+      total_upload_bytes / 1024, upload_page_ranges.size());
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
   uint64_t submission_current = command_processor_.GetCurrentSubmission();
   bool successful = true;
@@ -410,6 +425,7 @@ bool VulkanSharedMemory::UploadRanges(
                                    uint32_t(upload_regions_.size()), upload_regions_.data());
     upload_regions_.clear();
   }
+  command_processor_.PopDebugMarker();
   return successful;
 }
 
