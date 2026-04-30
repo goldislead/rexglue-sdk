@@ -87,7 +87,12 @@ void DxbcShaderTranslator::ProcessVertexFetchInstruction(
           a_.OpAdd(address_dest, index_operand, dxbc::Src::LF(0.5f));
           a_.OpRoundNI(address_dest, address_src);
         } else {
-          a_.OpRoundNI(address_dest, index_operand);
+          if (REXCVAR_GET(ac6_ground_fix)) {
+            a_.OpAdd(address_dest, index_operand, dxbc::Src::LF(0.00025f));
+            a_.OpRoundNI(address_dest, address_src);
+          } else {
+            a_.OpRoundNI(address_dest, index_operand);
+          }
         }
         if (index_operand_temp_pushed) {
           PopSystemTemp();

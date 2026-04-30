@@ -34,6 +34,10 @@ REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
                     "Insert debug markers into GPU command streams for tools "
                     "like PIX and RenderDoc. Automatically enabled when "
                     "RenderDoc is detected.");
+REXCVAR_DEFINE_BOOL(no_discard_stencil_in_transfer_pipelines, false, "GPU",
+                    "Do not discard samples in depth/stencil transfer pipelines");
+REXCVAR_DEFINE_BOOL(ac6_ground_fix, false, "HACKS",
+                    "Hide black ground issues in AC6 by adjusting vertex fetch rounding");
 
 REXCVAR_DEFINE_STRING(spirv_version_override, "1.0", "GPU/Vulkan",
                       "Override the SPIR-V version used in Vulkan shader translation.\n"

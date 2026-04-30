@@ -52,6 +52,7 @@ REXCVAR_DECLARE(bool, native_2x_msaa);
 REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
 REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
 REXCVAR_DECLARE(bool, direct_host_resolve);
+REXCVAR_DECLARE(bool, no_discard_stencil_in_transfer_pipelines);
 
 // GPU Textures
 REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
@@ -85,6 +86,7 @@ REXCVAR_DECLARE(bool, use_fuzzy_alpha_epsilon);
 REXCVAR_DECLARE(std::string, dump_shaders);
 REXCVAR_DECLARE(bool, dxbc_switch);
 REXCVAR_DECLARE(bool, dxbc_source_map);
+REXCVAR_DECLARE(bool, ac6_ground_fix);
 REXCVAR_DECLARE(std::string, trace_gpu_prefix);
 REXCVAR_DECLARE(bool, trace_gpu_stream);
 REXCVAR_DECLARE(std::string, swap_post_effect);

@@ -3729,11 +3729,13 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
         break;
       case TransferOutput::kStencilBit:
         // Discard the sample if the needed stencil bit is not set.
-        assert_true(cbuffer_index_stencil_mask != UINT32_MAX);
-        a.OpAnd(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(1, dxbc::Src::kXXXX),
-                dxbc::Src::CB(cbuffer_index_stencil_mask, kTransferCBVRegisterStencilMask, 0,
-                              dxbc::Src::kXXXX));
-        a.OpDiscard(false, dxbc::Src::R(0, dxbc::Src::kXXXX));
+        if (!REXCVAR_GET(no_discard_stencil_in_transfer_pipelines)) {
+          assert_true(cbuffer_index_stencil_mask != UINT32_MAX);
+          a.OpAnd(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(1, dxbc::Src::kXXXX),
+                  dxbc::Src::CB(cbuffer_index_stencil_mask, kTransferCBVRegisterStencilMask, 0,
+                                dxbc::Src::kXXXX));
+          a.OpDiscard(false, dxbc::Src::R(0, dxbc::Src::kXXXX));
+        }
         break;
     }
   }
