@@ -15,6 +15,8 @@
 
 REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, true, "GPU",
                     "Allow invalid fetch constants");
+REXCVAR_DEFINE_BOOL(gpu_allow_invalid_upload_range, false, "GPU",
+                    "Allow games to read data from pages marked as no access");
 REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
 REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
 REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
@@ -56,14 +58,14 @@ REXCVAR_DEFINE_BOOL(occlusion_query_log, false, "GPU",
                     "Log ZPD occlusion query events for debugging")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_INT32(occlusion_query_fake_lower_threshold, 0, "GPU",
+REXCVAR_DEFINE_INT32(occlusion_query_fake_lower_threshold, 80, "GPU",
                      "When >= 0, oscillate fake sample counts between this lower "
                      "bound and occlusion_query_fake_upper_threshold. When < 0, "
                      "disable writing fake results in the fallback path.")
     .range(-1, 100000)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_INT32(occlusion_query_fake_upper_threshold, 1000, "GPU",
+REXCVAR_DEFINE_INT32(occlusion_query_fake_upper_threshold, 100, "GPU",
                      "Upper bound for oscillating fake occlusion sample counts")
     .range(0, 100000)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

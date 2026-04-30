@@ -15,6 +15,7 @@
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
+#include <rex/graphics/flags.h>
 #include <rex/graphics/d3d12/command_processor.h>
 #include <rex/graphics/d3d12/shared_memory.h>
 #include <rex/logging.h>
@@ -378,6 +379,21 @@ bool D3D12SharedMemory::UploadRanges(
     uint32_t upload_range_length = upload_range.second;
     trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2(),
                                   upload_range_length << page_size_log2());
+    if (upload_range_length > 0 && !REXCVAR_GET(gpu_allow_invalid_upload_range)) {
+      const uint32_t range_start_addr = upload_range_start << page_size_log2();
+      const uint32_t upload_range_last_page = upload_range_start + upload_range_length - 1;
+      const uint32_t range_end_addr = upload_range_last_page << page_size_log2();
+      const memory::PageAccess start_access =
+          memory().GetPhysicalHeap()->QueryRangeAccess(range_start_addr, range_start_addr);
+      const memory::PageAccess end_access =
+          memory().GetPhysicalHeap()->QueryRangeAccess(range_end_addr, range_end_addr);
+      if (start_access == memory::PageAccess::kNoAccess ||
+          end_access == memory::PageAccess::kNoAccess) {
+        REXGPU_ERROR("D3D12 shared memory: Invalid upload range {:08X} length {:08X}",
+                     upload_range_start, upload_range_length);
+        return false;
+      }
+    }
     while (upload_range_length != 0) {
       ID3D12Resource* upload_buffer;
       size_t upload_buffer_offset, upload_buffer_size;

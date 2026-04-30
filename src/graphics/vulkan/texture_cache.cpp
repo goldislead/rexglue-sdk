@@ -33,7 +33,8 @@
 #include <rex/ui/vulkan/ui_samplers.h>
 #include <rex/ui/vulkan/util.h>
 
-REXCVAR_DEFINE_BOOL(non_seamless_cube_map, false, "GPU", "Use non-seamless cube map sampling");
+REXCVAR_DEFINE_BOOL(non_seamless_cube_map, true, "GPU",
+                    "Use non-seamless cube map sampling when supported");
 
 namespace rex::graphics::vulkan {
 
@@ -1793,9 +1794,9 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
   // Generate mip levels for scaled resolve textures via blit.
   if (level_last_for_blit_gen > 0) {
-    command_processor_.InsertDebugMarker("Mip Generation: %ux%u levels 1-%u",
-                                        width * texture_resolution_scale_x,
-                                        height * texture_resolution_scale_y, level_last_for_blit_gen);
+    command_processor_.InsertDebugMarker(
+        "Mip Generation: %ux%u levels 1-%u", width * texture_resolution_scale_x,
+        height * texture_resolution_scale_y, level_last_for_blit_gen);
     VkImage image = vulkan_texture.image();
     uint32_t scaled_width = width * texture_resolution_scale_x;
     uint32_t scaled_height = height * texture_resolution_scale_y;
@@ -1837,14 +1838,16 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
       blit_region.srcSubresource.baseArrayLayer = 0;
       blit_region.srcSubresource.layerCount = array_size;
       blit_region.srcOffsets[0] = {0, 0, 0};
-      blit_region.srcOffsets[1] = {static_cast<int32_t>(src_width), static_cast<int32_t>(src_height),
+      blit_region.srcOffsets[1] = {static_cast<int32_t>(src_width),
+                                   static_cast<int32_t>(src_height),
                                    static_cast<int32_t>(src_depth)};
       blit_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
       blit_region.dstSubresource.mipLevel = level;
       blit_region.dstSubresource.baseArrayLayer = 0;
       blit_region.dstSubresource.layerCount = array_size;
       blit_region.dstOffsets[0] = {0, 0, 0};
-      blit_region.dstOffsets[1] = {static_cast<int32_t>(dst_width), static_cast<int32_t>(dst_height),
+      blit_region.dstOffsets[1] = {static_cast<int32_t>(dst_width),
+                                   static_cast<int32_t>(dst_height),
                                    static_cast<int32_t>(dst_depth)};
 
       command_buffer.CmdVkBlitImage(image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
@@ -1870,8 +1873,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
       final_barrier.subresourceRange.baseArrayLayer = 0;
       final_barrier.subresourceRange.layerCount = array_size;
       command_buffer.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                                          nullptr, 1, &final_barrier);
+                                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                                          1, &final_barrier);
     }
   }
 

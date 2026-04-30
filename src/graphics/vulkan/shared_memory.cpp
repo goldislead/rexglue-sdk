@@ -16,6 +16,7 @@
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
+#include <rex/graphics/flags.h>
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/graphics/vulkan/deferred_command_buffer.h>
 #include <rex/graphics/vulkan/shared_memory.h>
@@ -385,6 +386,22 @@ bool VulkanSharedMemory::UploadRanges(
     uint32_t upload_range_length = upload_range.second;
     trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2(),
                                   upload_range_length << page_size_log2());
+    if (upload_range_length > 0 && !REXCVAR_GET(gpu_allow_invalid_upload_range)) {
+      const uint32_t range_start_addr = upload_range_start << page_size_log2();
+      const uint32_t upload_range_last_page = upload_range_start + upload_range_length - 1;
+      const uint32_t range_end_addr = upload_range_last_page << page_size_log2();
+      const memory::PageAccess start_access =
+          memory().GetPhysicalHeap()->QueryRangeAccess(range_start_addr, range_start_addr);
+      const memory::PageAccess end_access =
+          memory().GetPhysicalHeap()->QueryRangeAccess(range_end_addr, range_end_addr);
+      if (start_access == memory::PageAccess::kNoAccess ||
+          end_access == memory::PageAccess::kNoAccess) {
+        REXGPU_ERROR("Vulkan shared memory: Invalid upload range {:08X} length {:08X}",
+                     upload_range_start, upload_range_length);
+        successful = false;
+        break;
+      }
+    }
     while (upload_range_length) {
       VkBuffer upload_buffer;
       VkDeviceSize upload_buffer_offset, upload_buffer_size;
