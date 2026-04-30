@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,12 +22,60 @@
 #include <fmt/format.h>
 
 #include <rex/assert.h>
+#include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/shader/spirv.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
+#include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/string/buffer.h>
 
 namespace rex::graphics {
+
+namespace {
+
+std::optional<spv::SpvVersion> g_cached_spirv_version;
+
+bool TestSpirvVersionSupport(const ui::vulkan::VulkanDevice* vulkan_device,
+                             spv::SpvVersion spv_version) {
+  SpirvBuilder builder(spv_version, (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1, nullptr);
+
+  builder.setSource(spv::SourceLanguageUnknown, 0);
+  builder.setMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+  builder.addCapability(spv::CapabilityShader);
+
+  std::vector<spv::Id> param_types;
+  std::vector<spv::Decoration> decorations;
+  spv::Block* entry_block = nullptr;
+  spv::Function* main_function = builder.makeFunctionEntry(
+      spv::NoPrecision, builder.makeVoidType(), "main", param_types, decorations, &entry_block);
+
+  builder.addEntryPoint(spv::ExecutionModelGLCompute, main_function, "main");
+  builder.addExecutionMode(main_function, spv::ExecutionModeLocalSize, 1, 1, 1);
+  builder.makeReturn(false);
+  builder.leaveFunction();
+
+  std::vector<unsigned int> spirv_code;
+  builder.dump(spirv_code);
+
+  VkShaderModuleCreateInfo create_info;
+  create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  create_info.pNext = nullptr;
+  create_info.flags = 0;
+  create_info.codeSize = spirv_code.size() * sizeof(spirv_code[0]);
+  create_info.pCode = spirv_code.data();
+
+  VkShaderModule test_module = VK_NULL_HANDLE;
+  VkResult result = vulkan_device->functions().vkCreateShaderModule(
+      vulkan_device->device(), &create_info, nullptr, &test_module);
+  if (result == VK_SUCCESS) {
+    vulkan_device->functions().vkDestroyShaderModule(vulkan_device->device(), test_module, nullptr);
+    return true;
+  }
+
+  return false;
+}
+
+}  // namespace
 
 SpirvShaderTranslator::Features::Features(bool all)
     : spirv_version(all ? spv::Spv_1_5 : spv::Spv_1_0),
@@ -60,15 +109,27 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const 
       fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
       demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation),
       sample_rate_shading(vulkan_device->properties().sampleRateShading) {
-  const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
-  if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
-    spirv_version = spv::Spv_1_5;
-  } else if (vulkan_device->extensions().ext_1_2_KHR_spirv_1_4) {
-    spirv_version = spv::Spv_1_4;
-  } else if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
-    spirv_version = spv::Spv_1_3;
-  } else {
+  const std::string& override_version = REXCVAR_GET(spirv_version_override);
+  if (override_version == "1.0") {
     spirv_version = spv::Spv_1_0;
+  } else if (override_version == "1.3") {
+    spirv_version = spv::Spv_1_3;
+  } else if (override_version == "1.4") {
+    spirv_version = spv::Spv_1_4;
+  } else if (override_version == "1.5") {
+    spirv_version = spv::Spv_1_5;
+  } else {
+    if (g_cached_spirv_version.has_value()) {
+      spirv_version = g_cached_spirv_version.value();
+    } else if (TestSpirvVersionSupport(vulkan_device, spv::Spv_1_5)) {
+      spirv_version = spv::Spv_1_5;
+      g_cached_spirv_version = spirv_version;
+      REXLOG_INFO("SPIR-V 1.5 shader module test passed; using SPIR-V 1.5");
+    } else {
+      spirv_version = spv::Spv_1_0;
+      g_cached_spirv_version = spirv_version;
+      REXLOG_WARN("SPIR-V 1.5 shader module test failed; falling back to SPIR-V 1.0");
+    }
   }
 }
 
@@ -1175,7 +1236,7 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
     builder_->addCapability(spv::CapabilitySignedZeroInfNanPreserve);
     builder_->addExecutionMode(function_main_, spv::ExecutionModeSignedZeroInfNanPreserve, 32);
   }
-  if (features_.rounding_mode_rte_float32) {
+  if (features_.rounding_mode_rte_float32 && !REXCVAR_GET(spirv_disable_rounding_mode_rte)) {
     builder_->addCapability(spv::CapabilityRoundingModeRTE);
     builder_->addExecutionMode(function_main_, spv::ExecutionModeRoundingModeRTE, 32);
   }

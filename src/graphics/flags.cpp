@@ -33,6 +33,17 @@ REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
                     "like PIX and RenderDoc. Automatically enabled when "
                     "RenderDoc is detected.");
 
+REXCVAR_DEFINE_STRING(spirv_version_override, "1.0", "GPU/Vulkan",
+                      "Override the SPIR-V version used in Vulkan shader translation.\n"
+                      "Use: 1.0, 1.3, 1.4, 1.5, auto")
+    .allowed({"1.0", "1.3", "1.4", "1.5", "auto"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(spirv_disable_rounding_mode_rte, false, "GPU/Vulkan",
+                    "Disable RoundingModeRTE in SPIR-V shaders for tools that "
+                    "do not support the capability")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_STRING(occlusion_query, "fast", "GPU",
                       "Occlusion query mode.\n"
                       " fake: Always write fake sample counts (safe default)\n"

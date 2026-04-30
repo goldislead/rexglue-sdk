@@ -98,6 +98,8 @@ REXCVAR_DECLARE(bool, vulkan_tessellation_wireframe);
 REXCVAR_DECLARE(bool, vulkan_force_expand_point_sprites_in_vs);
 REXCVAR_DECLARE(bool, vulkan_force_expand_rectangle_lists_in_vs);
 REXCVAR_DECLARE(bool, vulkan_force_convert_quad_lists_to_triangle_lists);
+REXCVAR_DECLARE(std::string, spirv_version_override);
+REXCVAR_DECLARE(bool, spirv_disable_rounding_mode_rte);
 REXCVAR_DECLARE(std::string, render_target_path_vulkan);
 // Legacy backend compatibility aliases for shared readback controls.
 REXCVAR_DECLARE(bool, vulkan_readback_resolve);
