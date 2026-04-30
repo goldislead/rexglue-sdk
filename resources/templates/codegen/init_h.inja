@@ -59,9 +59,19 @@ extern PPCFuncMapping PPCFuncMappings[];
   REX_EXTERN(name);            \
   REX_EXTERN(__imp__##name)
 
+#if defined(__APPLE__)
+#define DEFINE_REX_FUNC(name)                                                       \
+  extern "C" void __imp__##name(PPCContext& __restrict, uint8_t*);                  \
+  __attribute__((weak, noinline)) extern "C" void name(                             \
+      [[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base) {                 \
+    __imp__##name(ctx, base);                                                       \
+  }                                                                                 \
+  extern "C" void __imp__##name([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
+#else
 #define DEFINE_REX_FUNC(name)                                  \
   __attribute__((alias("__imp__" #name))) REX_WEAK_FUNC(name); \
   REX_EXTERN(__imp__##name)
+#endif
 
 //=============================================================================
 // Function Prologue
@@ -101,7 +111,7 @@ extern PPCFuncMapping PPCFuncMappings[];
 // Memory Access
 //=============================================================================
 
-#if REX_PLATFORM_WIN32
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_MAC
 #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
 #else
 #define REX_PHYS_HOST_OFFSET(addr) 0u

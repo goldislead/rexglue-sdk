@@ -104,6 +104,27 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
               sizeof(thread_context.xmm_registers));
 #endif
 #elif REX_ARCH_ARM64
+#if REX_PLATFORM_MAC
+  // macOS ARM64: mcontext_t is __darwin_mcontext64* (pointer, not value)
+  std::memcpy(thread_context.x, mcontext->__ss.__x, sizeof(mcontext->__ss.__x));
+#if __DARWIN_OPAQUE_ARM_THREAD_STATE64
+  thread_context.x[29] = reinterpret_cast<uintptr_t>(mcontext->__ss.__opaque_fp);
+  thread_context.x[30] = reinterpret_cast<uintptr_t>(mcontext->__ss.__opaque_lr);
+  thread_context.sp    = reinterpret_cast<uintptr_t>(mcontext->__ss.__opaque_sp);
+  thread_context.pc    = reinterpret_cast<uintptr_t>(mcontext->__ss.__opaque_pc);
+#else
+  thread_context.x[29] = mcontext->__ss.__fp;
+  thread_context.x[30] = mcontext->__ss.__lr;
+  thread_context.sp    = mcontext->__ss.__sp;
+  thread_context.pc    = mcontext->__ss.__pc;
+#endif
+  thread_context.pstate = mcontext->__ss.__cpsr;
+  thread_context.fpsr = mcontext->__ns.__fpsr;
+  thread_context.fpcr = mcontext->__ns.__fpcr;
+  static_assert(sizeof(thread_context.v) == sizeof(mcontext->__ns.__v));
+  std::memcpy(thread_context.v, mcontext->__ns.__v, sizeof(thread_context.v));
+#else
+  // Linux ARM64: mcontext_t is struct sigcontext (value, not pointer)
   std::memcpy(thread_context.x, mcontext.regs, sizeof(thread_context.x));
   thread_context.sp = mcontext.sp;
   thread_context.pc = mcontext.pc;
@@ -132,6 +153,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     thread_context.fpcr = mcontext_fpsimd->fpcr;
     std::memcpy(thread_context.v, mcontext_fpsimd->vregs, sizeof(thread_context.v));
   }
+#endif  // REX_PLATFORM_MAC
 #endif  // REX_ARCH
 
   Exception ex;
@@ -170,19 +192,37 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       // Exception Level, 0b100101 without a change in the Exception Level),
       // bit 6 is 0 for reading from a memory location, 1 for writing to a
       // memory location.
+#if REX_PLATFORM_MAC
+      {
+        uint32_t mac_esr = mcontext->__es.__esr;
+        if (((mac_esr >> 26) & 0b111110) == 0b100100) {
+          access_violation_operation = (mac_esr & (1U << 6))
+                                           ? Exception::AccessViolationOperation::kWrite
+                                           : Exception::AccessViolationOperation::kRead;
+        } else {
+          bool instruction_is_store;
+          if (IsArm64LoadPrefetchStore(*reinterpret_cast<const uint32_t*>(thread_context.pc),
+                                       instruction_is_store)) {
+            access_violation_operation = instruction_is_store
+                                             ? Exception::AccessViolationOperation::kWrite
+                                             : Exception::AccessViolationOperation::kRead;
+          } else {
+            assert_always(
+                "No ESR in the exception thread context, or it's not a Data "
+                "Abort, and the faulting instruction is not a known load, "
+                "prefetch or store instruction");
+            access_violation_operation = Exception::AccessViolationOperation::kUnknown;
+          }
+        }
+      }
+#else
       if (mcontext_esr && ((mcontext_esr->esr >> 26) & 0b111110) == 0b100100) {
         access_violation_operation = (mcontext_esr->esr & (UINT64_C(1) << 6))
                                          ? Exception::AccessViolationOperation::kWrite
                                          : Exception::AccessViolationOperation::kRead;
       } else {
-        // Determine the memory access direction based on which instruction has
-        // requested it.
         // esr_context may be unavailable on certain hosts (for instance, on
-        // Android, it was added only in NDK r16 - which is the first NDK
-        // version to support the Android API level 27, while NDK r15 doesn't
-        // have esr_context in its API 26 sigcontext.h).
-        // On AArch64 (unlike on AArch32), the program counter is the address of
-        // the currently executing instruction.
+        // Android, it was added only in NDK r16).
         bool instruction_is_store;
         if (IsArm64LoadPrefetchStore(*reinterpret_cast<const uint32_t*>(mcontext.pc),
                                      instruction_is_store)) {
@@ -197,6 +237,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
           access_violation_operation = Exception::AccessViolationOperation::kUnknown;
         }
       }
+#endif  // REX_PLATFORM_MAC
 #else
       access_violation_operation = Exception::AccessViolationOperation::kUnknown;
 #endif  // REX_ARCH
@@ -271,6 +312,44 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
 #elif REX_ARCH_ARM64
       uint32_t modified_register_index;
       uint32_t modified_x_registers_remaining = ex.modified_x_registers();
+#if REX_PLATFORM_MAC
+      while (rex::bit_scan_forward(modified_x_registers_remaining, &modified_register_index)) {
+        modified_x_registers_remaining &= ~(UINT32_C(1) << modified_register_index);
+        if (modified_register_index < 29) {
+          mcontext->__ss.__x[modified_register_index] = thread_context.x[modified_register_index];
+        } else if (modified_register_index == 29) {
+#if __DARWIN_OPAQUE_ARM_THREAD_STATE64
+          mcontext->__ss.__opaque_fp = reinterpret_cast<void*>(thread_context.x[29]);
+#else
+          mcontext->__ss.__fp = thread_context.x[29];
+#endif
+        } else {
+#if __DARWIN_OPAQUE_ARM_THREAD_STATE64
+          mcontext->__ss.__opaque_lr = reinterpret_cast<void*>(thread_context.x[30]);
+#else
+          mcontext->__ss.__lr = thread_context.x[30];
+#endif
+        }
+      }
+#if __DARWIN_OPAQUE_ARM_THREAD_STATE64
+      mcontext->__ss.__opaque_sp = reinterpret_cast<void*>(thread_context.sp);
+      mcontext->__ss.__opaque_pc = reinterpret_cast<void*>(thread_context.pc);
+#else
+      mcontext->__ss.__sp = thread_context.sp;
+      mcontext->__ss.__pc = thread_context.pc;
+#endif
+      mcontext->__ss.__cpsr = thread_context.pstate;
+      mcontext->__ns.__fpsr = thread_context.fpsr;
+      mcontext->__ns.__fpcr = thread_context.fpcr;
+      {
+        uint32_t modified_v_registers_remaining = ex.modified_v_registers();
+        while (rex::bit_scan_forward(modified_v_registers_remaining, &modified_register_index)) {
+          modified_v_registers_remaining &= ~(UINT32_C(1) << modified_register_index);
+          std::memcpy(&mcontext->__ns.__v[modified_register_index],
+                      &thread_context.v[modified_register_index], sizeof(vec128_t));
+        }
+      }
+#else
       while (rex::bit_scan_forward(modified_x_registers_remaining, &modified_register_index)) {
         modified_x_registers_remaining &= ~(UINT32_C(1) << modified_register_index);
         mcontext.regs[modified_register_index] = thread_context.x[modified_register_index];
@@ -289,6 +368,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
           mcontext.regs[modified_register_index] = thread_context.x[modified_register_index];
         }
       }
+#endif  // REX_PLATFORM_MAC
 #endif  // REX_ARCH
       return;
     }
