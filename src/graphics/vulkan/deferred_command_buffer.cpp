@@ -19,6 +19,7 @@
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/graphics/vulkan/deferred_command_buffer.h>
 #include <rex/math.h>
+#include <rex/ui/vulkan/instance.h>
 
 namespace rex::graphics::vulkan {
 
@@ -154,6 +155,16 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
             reinterpret_cast<const VkBufferImageCopy*>(
                 reinterpret_cast<const uint8_t*>(stream) +
                 rex::align(sizeof(ArgsVkCopyBufferToImage), alignof(VkBufferImageCopy))));
+      } break;
+
+      case Command::kVkBlitImage: {
+        auto& args = *reinterpret_cast<const ArgsVkBlitImage*>(stream);
+        dfn.vkCmdBlitImage(command_buffer, args.src_image, args.src_image_layout, args.dst_image,
+                           args.dst_image_layout, args.region_count,
+                           reinterpret_cast<const VkImageBlit*>(
+                               reinterpret_cast<const uint8_t*>(stream) +
+                               rex::align(sizeof(ArgsVkBlitImage), alignof(VkImageBlit))),
+                           args.filter);
       } break;
 
       case Command::kVkCopyQueryPoolResults: {
@@ -312,6 +323,42 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
                              reinterpret_cast<const VkViewport*>(
                                  reinterpret_cast<const uint8_t*>(stream) +
                                  rex::align(sizeof(ArgsVkSetViewport), alignof(VkViewport))));
+      } break;
+
+      case Command::kVkBeginDebugUtilsLabelEXT: {
+        const ui::vulkan::VulkanInstance::Functions& ifn =
+            command_processor_.GetVulkanDevice()->vulkan_instance()->functions();
+        if (ifn.vkCmdBeginDebugUtilsLabelEXT) {
+          auto& args = *reinterpret_cast<const ArgsVkDebugUtilsLabel*>(stream);
+          const char* label_name = reinterpret_cast<const char*>(
+              reinterpret_cast<const uint8_t*>(stream) + sizeof(ArgsVkDebugUtilsLabel));
+          VkDebugUtilsLabelEXT label_info = {};
+          label_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+          label_info.pLabelName = label_name;
+          ifn.vkCmdBeginDebugUtilsLabelEXT(command_buffer, &label_info);
+        }
+      } break;
+
+      case Command::kVkEndDebugUtilsLabelEXT: {
+        const ui::vulkan::VulkanInstance::Functions& ifn =
+            command_processor_.GetVulkanDevice()->vulkan_instance()->functions();
+        if (ifn.vkCmdEndDebugUtilsLabelEXT) {
+          ifn.vkCmdEndDebugUtilsLabelEXT(command_buffer);
+        }
+      } break;
+
+      case Command::kVkInsertDebugUtilsLabelEXT: {
+        const ui::vulkan::VulkanInstance::Functions& ifn =
+            command_processor_.GetVulkanDevice()->vulkan_instance()->functions();
+        if (ifn.vkCmdInsertDebugUtilsLabelEXT) {
+          auto& args = *reinterpret_cast<const ArgsVkDebugUtilsLabel*>(stream);
+          const char* label_name = reinterpret_cast<const char*>(
+              reinterpret_cast<const uint8_t*>(stream) + sizeof(ArgsVkDebugUtilsLabel));
+          VkDebugUtilsLabelEXT label_info = {};
+          label_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+          label_info.pLabelName = label_name;
+          ifn.vkCmdInsertDebugUtilsLabelEXT(command_buffer, &label_info);
+        }
       } break;
 
       default:

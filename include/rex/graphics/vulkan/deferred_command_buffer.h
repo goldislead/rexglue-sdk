@@ -351,6 +351,50 @@ class DeferredCommandBuffer {
     std::memcpy(args_ptr + header_size, viewports, sizeof(VkViewport) * viewport_count);
   }
 
+  VkImageBlit* CmdBlitImageEmplace(VkImage src_image, VkImageLayout src_image_layout,
+                                   VkImage dst_image, VkImageLayout dst_image_layout,
+                                   uint32_t region_count, VkFilter filter) {
+    const size_t header_size = rex::align(sizeof(ArgsVkBlitImage), alignof(VkImageBlit));
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+        WriteCommand(Command::kVkBlitImage, header_size + sizeof(VkImageBlit) * region_count));
+    auto& args = *reinterpret_cast<ArgsVkBlitImage*>(args_ptr);
+    args.src_image = src_image;
+    args.src_image_layout = src_image_layout;
+    args.dst_image = dst_image;
+    args.dst_image_layout = dst_image_layout;
+    args.region_count = region_count;
+    args.filter = filter;
+    return reinterpret_cast<VkImageBlit*>(args_ptr + header_size);
+  }
+  void CmdVkBlitImage(VkImage src_image, VkImageLayout src_image_layout, VkImage dst_image,
+                      VkImageLayout dst_image_layout, uint32_t region_count,
+                      const VkImageBlit* regions, VkFilter filter) {
+    std::memcpy(CmdBlitImageEmplace(src_image, src_image_layout, dst_image, dst_image_layout,
+                                    region_count, filter),
+                regions, sizeof(VkImageBlit) * region_count);
+  }
+
+  // Debug marker support for RenderDoc/debug tools annotation.
+  void CmdVkBeginDebugUtilsLabelEXT(const char* label_name) {
+    size_t label_len = std::strlen(label_name);
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(WriteCommand(
+        Command::kVkBeginDebugUtilsLabelEXT, sizeof(ArgsVkDebugUtilsLabel) + label_len + 1));
+    auto& args = *reinterpret_cast<ArgsVkDebugUtilsLabel*>(args_ptr);
+    args.label_length = static_cast<uint32_t>(label_len);
+    std::memcpy(args_ptr + sizeof(ArgsVkDebugUtilsLabel), label_name, label_len + 1);
+  }
+
+  void CmdVkEndDebugUtilsLabelEXT() { WriteCommand(Command::kVkEndDebugUtilsLabelEXT, 0); }
+
+  void CmdVkInsertDebugUtilsLabelEXT(const char* label_name) {
+    size_t label_len = std::strlen(label_name);
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(WriteCommand(
+        Command::kVkInsertDebugUtilsLabelEXT, sizeof(ArgsVkDebugUtilsLabel) + label_len + 1));
+    auto& args = *reinterpret_cast<ArgsVkDebugUtilsLabel*>(args_ptr);
+    args.label_length = static_cast<uint32_t>(label_len);
+    std::memcpy(args_ptr + sizeof(ArgsVkDebugUtilsLabel), label_name, label_len + 1);
+  }
+
  private:
   enum class Command {
     kVkBeginRenderPass,
@@ -363,6 +407,7 @@ class DeferredCommandBuffer {
     kVkClearColorImage,
     kVkCopyBuffer,
     kVkCopyBufferToImage,
+    kVkBlitImage,
     kVkCopyQueryPoolResults,
     kVkDispatch,
     kVkDraw,
@@ -381,6 +426,9 @@ class DeferredCommandBuffer {
     kVkSetStencilReference,
     kVkSetStencilWriteMask,
     kVkSetViewport,
+    kVkBeginDebugUtilsLabelEXT,
+    kVkEndDebugUtilsLabelEXT,
+    kVkInsertDebugUtilsLabelEXT,
   };
 
   struct CommandHeader {
@@ -484,6 +532,17 @@ class DeferredCommandBuffer {
     static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
   };
 
+  struct ArgsVkBlitImage {
+    VkImage src_image;
+    VkImageLayout src_image_layout;
+    VkImage dst_image;
+    VkImageLayout dst_image_layout;
+    uint32_t region_count;
+    VkFilter filter;
+    // Followed by aligned VkImageBlit[].
+    static_assert(alignof(VkImageBlit) <= alignof(uintmax_t));
+  };
+
   struct ArgsVkCopyQueryPoolResults {
     VkQueryPool query_pool;
     uint32_t first_query;
@@ -575,6 +634,11 @@ class DeferredCommandBuffer {
     uint32_t viewport_count;
     // Followed by aligned VkViewport[].
     static_assert(alignof(VkViewport) <= alignof(uintmax_t));
+  };
+
+  struct ArgsVkDebugUtilsLabel {
+    uint32_t label_length;
+    // Followed by null-terminated label string.
   };
 
   void* WriteCommand(Command command, size_t arguments_size_bytes);
