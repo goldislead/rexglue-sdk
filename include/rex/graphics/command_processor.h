@@ -195,16 +195,22 @@ class CommandProcessor {
   virtual void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
   virtual void WriteRegisterRangeFromRing(memory::RingBuffer* ring, uint32_t base,
                                           uint32_t num_registers);
-  void WriteALURangeFromRing(memory::RingBuffer* ring, uint32_t base, uint32_t num_registers);
-  void WriteFetchRangeFromRing(memory::RingBuffer* ring, uint32_t base, uint32_t num_registers);
-  void WriteBoolRangeFromRing(memory::RingBuffer* ring, uint32_t base, uint32_t num_registers);
-  void WriteLoopRangeFromRing(memory::RingBuffer* ring, uint32_t base, uint32_t num_registers);
-  void WriteREGISTERSRangeFromRing(memory::RingBuffer* ring, uint32_t base, uint32_t num_registers);
-  void WriteALURangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
-  void WriteFetchRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
-  void WriteBoolRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
-  void WriteLoopRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
-  void WriteREGISTERSRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  virtual void WriteALURangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                     uint32_t num_registers);
+  virtual void WriteFetchRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                       uint32_t num_registers);
+  virtual void WriteBoolRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                      uint32_t num_registers);
+  virtual void WriteLoopRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                      uint32_t num_registers);
+  virtual void WriteREGISTERSRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                           uint32_t num_registers);
+  virtual void WriteALURangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  virtual void WriteFetchRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  virtual void WriteBoolRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  virtual void WriteLoopRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  virtual void WriteREGISTERSRangeFromMem(uint32_t start_index, uint32_t* base,
+                                          uint32_t num_registers);
 
   const reg::DC_LUT_30_COLOR* gamma_ramp_256_entry_table() const {
     return gamma_ramp_256_entry_table_;
@@ -266,8 +272,7 @@ class CommandProcessor {
   virtual bool CanOpenZPDQuery() const { return true; }
 
   // Backend acquires a pool slot, records BeginQuery, tracks it internally.
-  virtual QueryOpenResult OpenZPDQuery(ReportHandle report_handle,
-                                       bool can_close_submission) {
+  virtual QueryOpenResult OpenZPDQuery(ReportHandle report_handle, bool can_close_submission) {
     return QueryOpenResult::kFailed;
   }
   // Backend records EndQuery, queues a resolve for the active slot.
@@ -294,9 +299,8 @@ class CommandProcessor {
   void OnZPDQueryResolved(ReportHandle report_handle, uint64_t raw_samples);
 
   // Writes guest report with begin_value read from guest memory.
-  void WriteZPDReport(uint32_t begin_record, uint32_t end_record,
-                      uint32_t begin_value, uint32_t delta_value,
-                      bool write_begin_record);
+  void WriteZPDReport(uint32_t begin_record, uint32_t end_record, uint32_t begin_value,
+                      uint32_t delta_value, bool write_begin_record);
 
   // Called from PrepareForWait so strict mode can retire before guest loops.
   void PumpPendingRetire();
@@ -418,12 +422,8 @@ class CommandProcessor {
   uint32_t zpd_draw_resolution_scale_x_ = 1;
   uint32_t zpd_draw_resolution_scale_y_ = 1;
 
-  uint32_t zpd_draw_resolution_scale_x() const {
-    return zpd_draw_resolution_scale_x_;
-  }
-  uint32_t zpd_draw_resolution_scale_y() const {
-    return zpd_draw_resolution_scale_y_;
-  }
+  uint32_t zpd_draw_resolution_scale_x() const { return zpd_draw_resolution_scale_x_; }
+  uint32_t zpd_draw_resolution_scale_y() const { return zpd_draw_resolution_scale_y_; }
 
   uint32_t fake_zpd_sample_count_ = 0;
   ZPDStats zpd_stats_;

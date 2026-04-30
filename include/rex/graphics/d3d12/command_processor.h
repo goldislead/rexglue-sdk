@@ -213,6 +213,26 @@ class D3D12CommandProcessor : public CommandProcessor {
 
   void WriteRegister(uint32_t index, uint32_t value) override;
   void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
+  void WriteALURangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                             uint32_t num_registers) override;
+  void WriteFetchRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                               uint32_t num_registers) override;
+  void WriteBoolRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                              uint32_t num_registers) override;
+  void WriteLoopRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                              uint32_t num_registers) override;
+  void WriteREGISTERSRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                   uint32_t num_registers) override;
+  void WriteALURangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
+  void WriteFetchRangeFromMem(uint32_t start_index, uint32_t* base,
+                              uint32_t num_registers) override;
+  void WriteBoolRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
+  void WriteLoopRangeFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
+  void WriteREGISTERSRangeFromMem(uint32_t start_index, uint32_t* base,
+                                  uint32_t num_registers) override;
+  void WriteShaderConstantsFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  void WriteBoolLoopFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  void WriteFetchFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;

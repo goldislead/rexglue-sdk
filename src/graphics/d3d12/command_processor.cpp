@@ -60,6 +60,36 @@ namespace shaders {
 #include "../shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h"
 }  // namespace shaders
 
+namespace {
+
+bool RangeHasAnyConstantUsage(const uint64_t* usage_map, uint32_t first_constant,
+                              uint32_t last_constant) {
+  if (first_constant > last_constant) {
+    return false;
+  }
+  uint32_t first_word = first_constant >> 6;
+  uint32_t last_word = last_constant >> 6;
+  uint32_t first_bit = first_constant & 63;
+  uint32_t last_bit = last_constant & 63;
+  if (first_word == last_word) {
+    uint32_t bit_count = last_bit - first_bit + 1;
+    uint64_t mask = bit_count == 64 ? UINT64_MAX : ((UINT64_C(1) << bit_count) - 1) << first_bit;
+    return (usage_map[first_word] & mask) != 0;
+  }
+  if (usage_map[first_word] & (UINT64_MAX << first_bit)) {
+    return true;
+  }
+  for (uint32_t word = first_word + 1; word < last_word; ++word) {
+    if (usage_map[word]) {
+      return true;
+    }
+  }
+  uint64_t last_mask = last_bit == 63 ? UINT64_MAX : ((UINT64_C(1) << (last_bit + 1)) - 1);
+  return (usage_map[last_word] & last_mask) != 0;
+}
+
+}  // namespace
+
 D3D12CommandProcessor::D3D12CommandProcessor(D3D12GraphicsSystem* graphics_system,
                                              system::KernelState* kernel_state)
     : CommandProcessor(graphics_system, kernel_state), deferred_command_list_(*this) {
@@ -1807,81 +1837,161 @@ void D3D12CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t
   if (!num_registers) {
     return;
   }
-  uint32_t end_index = start_index + num_registers - 1;
 
-  auto range_has_any_constant_usage = [](const uint64_t* usage_map, uint32_t first_constant,
-                                         uint32_t last_constant) -> bool {
-    if (first_constant > last_constant) {
-      return false;
-    }
-    uint32_t first_word = first_constant >> 6;
-    uint32_t last_word = last_constant >> 6;
-    uint32_t first_bit = first_constant & 63;
-    uint32_t last_bit = last_constant & 63;
-    if (first_word == last_word) {
-      uint32_t bit_count = last_bit - first_bit + 1;
-      uint64_t mask = bit_count == 64 ? UINT64_MAX : ((UINT64_C(1) << bit_count) - 1) << first_bit;
-      return (usage_map[first_word] & mask) != 0;
-    }
-    if (usage_map[first_word] & (UINT64_MAX << first_bit)) {
-      return true;
-    }
-    for (uint32_t word = first_word + 1; word < last_word; ++word) {
-      if (usage_map[word]) {
-        return true;
-      }
-    }
-    uint64_t last_mask = last_bit == 63 ? UINT64_MAX : ((UINT64_C(1) << (last_bit + 1)) - 1);
-    return (usage_map[last_word] & last_mask) != 0;
+  uint32_t current_index = start_index;
+  uint32_t registers_remaining = num_registers;
+  auto write_regular = [&](uint32_t count) {
+    CommandProcessor::WriteRegistersFromMem(current_index, base, count);
+    current_index += count;
+    base += count;
+    registers_remaining -= count;
+  };
+  auto write_shader_constants = [&](uint32_t count) {
+    WriteShaderConstantsFromMem(current_index, base, count);
+    current_index += count;
+    base += count;
+    registers_remaining -= count;
+  };
+  auto write_fetch_constants = [&](uint32_t count) {
+    WriteFetchFromMem(current_index, base, count);
+    current_index += count;
+    base += count;
+    registers_remaining -= count;
+  };
+  auto write_bool_loop_constants = [&](uint32_t count) {
+    WriteBoolLoopFromMem(current_index, base, count);
+    current_index += count;
+    base += count;
+    registers_remaining -= count;
   };
 
-  if (start_index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
-      end_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
-    if (frame_open_) {
-      uint32_t first_float_constant = (start_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
-      uint32_t last_float_constant = (end_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
-      if (first_float_constant < 256) {
-        uint32_t last_vertex_constant = std::min(last_float_constant, 255u);
-        if (range_has_any_constant_usage(current_float_constant_map_vertex_, first_float_constant,
-                                         last_vertex_constant)) {
-          cbuffer_binding_float_vertex_.up_to_date = false;
-        }
-      }
-      if (last_float_constant >= 256) {
-        uint32_t first_pixel_constant =
-            first_float_constant >= 256 ? first_float_constant - 256 : 0;
-        uint32_t last_pixel_constant = last_float_constant - 256;
-        if (range_has_any_constant_usage(current_float_constant_map_pixel_, first_pixel_constant,
-                                         last_pixel_constant)) {
-          cbuffer_binding_float_pixel_.up_to_date = false;
-        }
-      }
+  while (registers_remaining) {
+    if (current_index < XE_GPU_REG_SHADER_CONSTANT_000_X) {
+      write_regular(
+          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_000_X - current_index));
+    } else if (current_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+      write_shader_constants(
+          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 - current_index));
+    } else if (current_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+               current_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+      write_fetch_constants(
+          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5 + 1 - current_index));
+    } else if (current_index < XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031) {
+      write_regular(
+          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 - current_index));
+    } else if (current_index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
+      write_bool_loop_constants(
+          std::min(registers_remaining, XE_GPU_REG_SHADER_CONSTANT_LOOP_31 + 1 - current_index));
+    } else {
+      write_regular(registers_remaining);
     }
+  }
+}
+
+void D3D12CommandProcessor::WriteALURangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                                  uint32_t num_registers) {
+  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_000_X, num_registers);
+}
+
+void D3D12CommandProcessor::WriteFetchRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                                    uint32_t num_registers) {
+  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, num_registers);
+}
+
+void D3D12CommandProcessor::WriteBoolRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                                   uint32_t num_registers) {
+  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, num_registers);
+}
+
+void D3D12CommandProcessor::WriteLoopRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                                   uint32_t num_registers) {
+  WriteRegisterRangeFromRing(ring, base + XE_GPU_REG_SHADER_CONSTANT_LOOP_00, num_registers);
+}
+
+void D3D12CommandProcessor::WriteREGISTERSRangeFromRing(memory::RingBuffer* ring, uint32_t base,
+                                                        uint32_t num_registers) {
+  WriteRegisterRangeFromRing(ring, base + 0x2000, num_registers);
+}
+
+void D3D12CommandProcessor::WriteALURangeFromMem(uint32_t start_index, uint32_t* base,
+                                                 uint32_t num_registers) {
+  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_000_X, base, num_registers);
+}
+
+void D3D12CommandProcessor::WriteFetchRangeFromMem(uint32_t start_index, uint32_t* base,
+                                                   uint32_t num_registers) {
+  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, base, num_registers);
+}
+
+void D3D12CommandProcessor::WriteBoolRangeFromMem(uint32_t start_index, uint32_t* base,
+                                                  uint32_t num_registers) {
+  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, base, num_registers);
+}
+
+void D3D12CommandProcessor::WriteLoopRangeFromMem(uint32_t start_index, uint32_t* base,
+                                                  uint32_t num_registers) {
+  WriteRegistersFromMem(start_index + XE_GPU_REG_SHADER_CONSTANT_LOOP_00, base, num_registers);
+}
+
+void D3D12CommandProcessor::WriteREGISTERSRangeFromMem(uint32_t start_index, uint32_t* base,
+                                                       uint32_t num_registers) {
+  WriteRegistersFromMem(start_index + 0x2000, base, num_registers);
+}
+
+void D3D12CommandProcessor::WriteShaderConstantsFromMem(uint32_t start_index, uint32_t* base,
+                                                        uint32_t num_registers) {
+  if (!num_registers) {
+    return;
+  }
+  memory::copy_and_swap_32_unaligned(register_file_->values + start_index, base, num_registers);
+
+  if (!frame_open_) {
     return;
   }
 
-  if (start_index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
-      end_index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
-    cbuffer_binding_bool_loop_.up_to_date = false;
-    return;
-  }
-
-  if (start_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
-      end_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
-    cbuffer_binding_fetch_.up_to_date = false;
-    uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
-    uint32_t last_fetch_dword = end_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
-    if (texture_cache_) {
-      texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
+  uint32_t end_index = start_index + num_registers - 1;
+  uint32_t first_float_constant = (start_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+  uint32_t last_float_constant = (end_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+  if (first_float_constant < 256) {
+    uint32_t last_vertex_constant = std::min(last_float_constant, 255u);
+    if (RangeHasAnyConstantUsage(current_float_constant_map_vertex_, first_float_constant,
+                                 last_vertex_constant)) {
+      cbuffer_binding_float_vertex_.up_to_date = false;
     }
-    InvalidateVertexBufferResidencyRange(first_fetch_dword / 2, last_fetch_dword / 2);
+  }
+  if (last_float_constant >= 256) {
+    uint32_t first_pixel_constant = first_float_constant >= 256 ? first_float_constant - 256 : 0;
+    uint32_t last_pixel_constant = last_float_constant - 256;
+    if (RangeHasAnyConstantUsage(current_float_constant_map_pixel_, first_pixel_constant,
+                                 last_pixel_constant)) {
+      cbuffer_binding_float_pixel_.up_to_date = false;
+    }
+  }
+}
+
+void D3D12CommandProcessor::WriteBoolLoopFromMem(uint32_t start_index, uint32_t* base,
+                                                 uint32_t num_registers) {
+  if (!num_registers) {
     return;
   }
+  memory::copy_and_swap_32_unaligned(register_file_->values + start_index, base, num_registers);
+  cbuffer_binding_bool_loop_.up_to_date = false;
+}
 
-  CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+void D3D12CommandProcessor::WriteFetchFromMem(uint32_t start_index, uint32_t* base,
+                                              uint32_t num_registers) {
+  if (!num_registers) {
+    return;
+  }
+  memory::copy_and_swap_32_unaligned(register_file_->values + start_index, base, num_registers);
+  cbuffer_binding_fetch_.up_to_date = false;
+
+  uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+  uint32_t last_fetch_dword = first_fetch_dword + num_registers - 1;
+  if (texture_cache_) {
+    texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
+  }
+  InvalidateVertexBufferResidencyRange(first_fetch_dword / 2, last_fetch_dword / 2);
 }
 
 void D3D12CommandProcessor::OnGammaRamp256EntryTableValueWritten() {
