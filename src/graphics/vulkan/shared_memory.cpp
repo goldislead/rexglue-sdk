@@ -299,6 +299,13 @@ void VulkanSharedMemory::InitializeTraceCompleteDownloads() {
   ResetTraceDownload();
 }
 
+void VulkanSharedMemory::ClearCache() {
+  SharedMemory::ClearCache();
+  if (upload_buffer_pool_) {
+    upload_buffer_pool_->ClearCache();
+  }
+}
+
 bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                                           uint32_t length_allocations) {
   if (!length_allocations) {
