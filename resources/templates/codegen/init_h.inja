@@ -222,15 +222,21 @@ extern PPCFuncMapping PPCFuncMappings[];
 #define REX_CALL_FUNC(x) x(ctx, base)
 
 #define REX_LOOKUP_FUNC(x, y) \
-  (*(PPCFunc**)(x + REX_IMAGE_BASE + REX_IMAGE_SIZE + (u64(u32(y) - REX_CODE_BASE) * 2)))
+  (rex::runtime::ResolveIndirectFunction(u32(y)))
 
 #ifdef REXGLUE_ENABLE_PROFILING
 #define REX_CALL_INDIRECT_FUNC(x) \
-  PROFILE_FUNCTION_DISPATCHED();  \
-  REX_LOOKUP_FUNC(base, x)(ctx, base);
+  do {                             \
+    PROFILE_FUNCTION_DISPATCHED(); \
+    ctx.last_indirect_target = u32(x); \
+    REX_LOOKUP_FUNC(base, x)(ctx, base); \
+  } while (0)
 #else
 #define REX_CALL_INDIRECT_FUNC(x) \
-  REX_LOOKUP_FUNC(base, x)(ctx, base);
+  do {                             \
+    ctx.last_indirect_target = u32(x); \
+    REX_LOOKUP_FUNC(base, x)(ctx, base); \
+  } while (0)
 #endif
 
 //=============================================================================

@@ -29,7 +29,7 @@
 // Forward declaration for function mapping (defined in rex/ppc/context.h)
 struct PPCFuncMapping;
 
-#include <rex/ppc/image_info.h>
+#include <rex/image_info.h>
 
 REXCVAR_DECLARE(std::string, game_data_root);
 REXCVAR_DECLARE(std::string, user_data_root);

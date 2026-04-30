@@ -14,6 +14,16 @@
 
 #include <fmt/format.h>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <rex/assert.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -43,8 +53,46 @@ constexpr uint32_t kDeferredOverlappedDelayMillis = 100;
 // be using to stash their variables.
 KernelState* shared_kernel_state_ = nullptr;
 
-KernelState* kernel_state() {
+#ifdef _WIN32
+extern "C" __declspec(dllexport) KernelState* rexglue_get_kernel_state() {
   return shared_kernel_state_;
+}
+
+namespace {
+
+using GetKernelStateFn = KernelState* (*)();
+
+KernelState* GetMainModuleKernelState() {
+  HMODULE main_module = ::GetModuleHandleW(nullptr);
+  if (!main_module) {
+    return nullptr;
+  }
+
+  auto get_kernel_state =
+      reinterpret_cast<GetKernelStateFn>(::GetProcAddress(main_module, "rexglue_get_kernel_state"));
+  return get_kernel_state ? get_kernel_state() : nullptr;
+}
+
+KernelState* GetBoundKernelState() {
+  if (shared_kernel_state_) {
+    return shared_kernel_state_;
+  }
+  return GetMainModuleKernelState();
+}
+
+}  // namespace
+#else
+namespace {
+
+KernelState* GetBoundKernelState() {
+  return shared_kernel_state_;
+}
+
+}  // namespace
+#endif
+
+KernelState* kernel_state() {
+  return GetBoundKernelState();
 }
 
 KernelState::KernelState(Runtime* emulator)
