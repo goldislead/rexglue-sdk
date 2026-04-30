@@ -708,7 +708,6 @@ void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   render_target_cache_->RestoreEdramSnapshot(snapshot);
 }
 
-
 std::string VulkanCommandProcessor::GetWindowTitleText() const {
   std::ostringstream title;
   title << "Vulkan";
@@ -4522,17 +4521,19 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
       return true;
     }
 
-    uint64_t scaled_start = 0, scaled_length = 0;
-    if (!texture_cache_->GetScaledResolveRange(written_address, written_length, 0, scaled_start,
-                                               scaled_length)) {
+    if (!texture_cache_->MakeScaledResolveRangeCurrent(written_address, written_length, 0)) {
       return true;
     }
+    uint64_t scaled_start = texture_cache_->GetCurrentScaledResolveRangeStartScaled();
+    uint64_t scaled_length = texture_cache_->GetCurrentScaledResolveRangeLengthScaled();
     if (!scaled_length) {
       return true;
     }
 
-    VkBuffer scaled_resolve_buffer = texture_cache_->scaled_resolve_buffer();
-    if (scaled_resolve_buffer == VK_NULL_HANDLE || scaled_start > uint64_t(UINT32_MAX)) {
+    VkBuffer scaled_resolve_buffer = texture_cache_->GetCurrentScaledResolveBuffer();
+    uint64_t scaled_buffer_base = texture_cache_->GetCurrentScaledResolveBufferBaseOffset();
+    if (scaled_resolve_buffer == VK_NULL_HANDLE || scaled_start < scaled_buffer_base ||
+        scaled_start - scaled_buffer_base > uint64_t(UINT32_MAX)) {
       return true;
     }
 
@@ -4618,7 +4619,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
     constants.scale_y = texture_cache_->draw_resolution_scale_y();
     constants.pixel_size_log2 = pixel_size_log2;
     constants.tile_count = tile_count;
-    constants.source_offset_bytes = uint32_t(scaled_start);
+    constants.source_offset_bytes = uint32_t(scaled_start - scaled_buffer_base);
     constants.half_pixel_offset = (REXCVAR_GET(readback_resolve_half_pixel_offset) &&
                                    (constants.scale_x > 1 || constants.scale_y > 1))
                                       ? 1u
@@ -4752,8 +4753,7 @@ void VulkanCommandProcessor::EnsureZPDQueryResources() {
     return;
   }
 
-  bool can_recreate = !zpd_active_segment_.logical_active &&
-                      !zpd_active_segment_.segment_active &&
+  bool can_recreate = !zpd_active_segment_.logical_active && !zpd_active_segment_.segment_active &&
                       !zpd_host_query_pool_->has_pending_resolve_batch() &&
                       zpd_resolves_in_flight_.empty();
   zpd_host_query_pool_->EnsureInitialized(GetVulkanDevice(), kZPDQueryPoolCapacity, can_recreate);
@@ -4777,8 +4777,8 @@ bool VulkanCommandProcessor::CanOpenZPDQuery() const {
   return in_render_pass_;
 }
 
-CommandProcessor::QueryOpenResult VulkanCommandProcessor::OpenZPDQuery(
-    ReportHandle report_handle, bool can_close_submission) {
+CommandProcessor::QueryOpenResult VulkanCommandProcessor::OpenZPDQuery(ReportHandle report_handle,
+                                                                       bool can_close_submission) {
   if (!BeginSubmission(true)) {
     return QueryOpenResult::kFailed;
   }
@@ -4917,8 +4917,7 @@ void VulkanCommandProcessor::PumpQueryResolves() {
     zpd_deferred_releases_.pop_front();
   }
 
-  if (!zpd_resolves_in_flight_.empty() &&
-      zpd_resolves_in_flight_.front().submission <= completed) {
+  if (!zpd_resolves_in_flight_.empty() && zpd_resolves_in_flight_.front().submission <= completed) {
     zpd_host_query_pool_->InvalidateReadback();
   }
 
@@ -4930,8 +4929,7 @@ void VulkanCommandProcessor::PumpQueryResolves() {
     zpd_resolves_in_flight_.pop_front();
 
     if (zpd_host_query_pool_->GenerationMatches(resolve.query_index, resolve.query_generation)) {
-      uint64_t raw_samples =
-          zpd_host_query_pool_->GetQueryReadbackValue(resolve.query_index);
+      uint64_t raw_samples = zpd_host_query_pool_->GetQueryReadbackValue(resolve.query_index);
       zpd_host_query_pool_->ReleaseQueryIndex(resolve.query_index, resolve.query_generation);
       OnZPDQueryResolved(resolve.report_handle, raw_samples);
     }
@@ -4986,8 +4984,7 @@ bool VulkanCommandProcessor::AwaitQueryResolve(ReportHandle report_handle) {
   PumpQueryResolves();
 
   auto it = logical_zpd_reports_.find(report_handle);
-  return it == logical_zpd_reports_.end() ||
-         (it->second.pending_segments == 0 && it->second.ended);
+  return it == logical_zpd_reports_.end() || (it->second.pending_segments == 0 && it->second.ended);
 }
 
 void VulkanCommandProcessor::InitializeTrace() {

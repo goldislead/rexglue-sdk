@@ -123,12 +123,25 @@ class VulkanTextureCache final : public TextureCache {
   bool GetScaledResolveRange(uint32_t start_unscaled, uint32_t length_unscaled,
                              uint32_t length_scaled_alignment_log2, uint64_t& start_scaled_out,
                              uint64_t& length_scaled_out) const;
+  bool MakeScaledResolveRangeCurrent(uint32_t start_unscaled, uint32_t length_unscaled,
+                                     uint32_t length_scaled_alignment_log2 = 0);
   bool CommitScaledResolveRange(uint32_t start_unscaled, uint32_t length_unscaled,
                                 uint32_t length_scaled_alignment_log2 = 0) {
-    return EnsureScaledResolveMemoryCommitted(start_unscaled, length_unscaled,
-                                              length_scaled_alignment_log2);
+    return MakeScaledResolveRangeCurrent(start_unscaled, length_unscaled,
+                                         length_scaled_alignment_log2);
   }
-  VkBuffer scaled_resolve_buffer() const { return scaled_resolve_buffer_; }
+  VkBuffer GetCurrentScaledResolveBuffer() const;
+  VkBuffer scaled_resolve_buffer() const { return GetCurrentScaledResolveBuffer(); }
+  uint64_t GetCurrentScaledResolveBufferBaseOffset() const {
+    return sparse_scaled_resolve_supported_ ? uint64_t(scaled_resolve_current_buffer_index_) << 30
+                                            : 0;
+  }
+  uint64_t GetCurrentScaledResolveRangeStartScaled() const {
+    return scaled_resolve_current_range_start_scaled_;
+  }
+  uint64_t GetCurrentScaledResolveRangeLengthScaled() const {
+    return scaled_resolve_current_range_length_scaled_;
+  }
   void UseScaledResolveBufferForRead();
   void UseScaledResolveBufferForWrite(uint64_t written_start_scaled,
                                       uint64_t written_length_scaled);
@@ -324,6 +337,15 @@ class VulkanTextureCache final : public TextureCache {
   bool EnsureScaledResolveBufferAllocated(uint64_t start_scaled, uint64_t length_scaled);
   void GetScaledResolveUsageMasks(VkPipelineStageFlags& stage_mask_out,
                                   VkAccessFlags& access_mask_out, bool write) const;
+  bool InitializeSparseScaledResolve();
+  void ShutdownSparseScaledResolve();
+  size_t GetScaledResolveSparseBufferCount() const;
+  std::array<size_t, 2> GetPossibleScaledResolveBufferIndices(uint64_t address_scaled) const;
+  bool EnsureScaledResolveMemoryCommittedSparse(uint32_t start_unscaled, uint32_t length_unscaled,
+                                                uint32_t length_scaled_alignment_log2);
+  bool MakeScaledResolveRangeCurrentSparse(uint32_t start_unscaled, uint32_t length_unscaled,
+                                           uint32_t length_scaled_alignment_log2);
+  void BindScaledResolveHeapToOverlappingBuffers(uint32_t heap_index, VkDeviceMemory heap);
 
   xenos::ClampMode NormalizeClampMode(xenos::ClampMode clamp_mode) const;
 
@@ -387,6 +409,30 @@ class VulkanTextureCache final : public TextureCache {
   std::vector<VkDeviceMemory> scaled_resolve_buffer_memory_;
   uint32_t scaled_resolve_sparse_granularity_log2_ = UINT32_MAX;
   std::vector<uint64_t> scaled_resolve_sparse_allocated_;
+  class ScaledResolveSparseBuffer {
+   public:
+    explicit ScaledResolveSparseBuffer(VkBuffer buffer) : buffer_(buffer) {}
+    VkBuffer buffer() const { return buffer_; }
+
+   private:
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+  };
+  static constexpr uint32_t kScaledResolveHeapSizeLog2 = 24;
+  static constexpr uint32_t kScaledResolveHeapSize = uint32_t(1) << kScaledResolveHeapSizeLog2;
+  static constexpr uint64_t kScaledResolveSparseBufferSize = uint64_t(2) << 30;
+  static constexpr size_t kMaxScaledResolveSparseBuffers =
+      (uint64_t(SharedMemory::kBufferSize) * kMaxDrawResolutionScaleAlongAxis *
+           kMaxDrawResolutionScaleAlongAxis -
+       1) >>
+      30;
+  bool sparse_scaled_resolve_supported_ = false;
+  std::array<std::unique_ptr<ScaledResolveSparseBuffer>, kMaxScaledResolveSparseBuffers>
+      scaled_resolve_sparse_buffers_;
+  std::vector<VkDeviceMemory> scaled_resolve_heaps_;
+  uint32_t scaled_resolve_heap_count_ = 0;
+  uint32_t scaled_resolve_current_buffer_index_ = UINT32_MAX;
+  uint64_t scaled_resolve_current_range_start_scaled_ = 0;
+  uint64_t scaled_resolve_current_range_length_scaled_ = 0;
   bool scaled_resolve_last_usage_write_ = false;
   std::pair<uint64_t, uint64_t> scaled_resolve_last_written_range_{0, 0};
 };

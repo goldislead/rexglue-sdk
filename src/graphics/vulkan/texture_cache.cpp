@@ -1207,12 +1207,47 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
 bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unscaled,
                                                             uint32_t length_unscaled,
                                                             uint32_t length_scaled_alignment_log2) {
+  if (sparse_scaled_resolve_supported_) {
+    return EnsureScaledResolveMemoryCommittedSparse(start_unscaled, length_unscaled,
+                                                    length_scaled_alignment_log2);
+  }
   uint64_t start_scaled, length_scaled;
   if (!GetScaledResolveRange(start_unscaled, length_unscaled, length_scaled_alignment_log2,
                              start_scaled, length_scaled)) {
     return false;
   }
   return EnsureScaledResolveBufferAllocated(start_scaled, length_scaled);
+}
+
+bool VulkanTextureCache::MakeScaledResolveRangeCurrent(uint32_t start_unscaled,
+                                                       uint32_t length_unscaled,
+                                                       uint32_t length_scaled_alignment_log2) {
+  if (sparse_scaled_resolve_supported_) {
+    return MakeScaledResolveRangeCurrentSparse(start_unscaled, length_unscaled,
+                                               length_scaled_alignment_log2);
+  }
+
+  uint64_t start_scaled, length_scaled;
+  if (!GetScaledResolveRange(start_unscaled, length_unscaled, length_scaled_alignment_log2,
+                             start_scaled, length_scaled) ||
+      !EnsureScaledResolveBufferAllocated(start_scaled, length_scaled)) {
+    return false;
+  }
+  scaled_resolve_current_buffer_index_ = 0;
+  scaled_resolve_current_range_start_scaled_ = start_scaled;
+  scaled_resolve_current_range_length_scaled_ = length_scaled;
+  return true;
+}
+
+VkBuffer VulkanTextureCache::GetCurrentScaledResolveBuffer() const {
+  if (sparse_scaled_resolve_supported_) {
+    if (scaled_resolve_current_buffer_index_ < scaled_resolve_sparse_buffers_.size() &&
+        scaled_resolve_sparse_buffers_[scaled_resolve_current_buffer_index_]) {
+      return scaled_resolve_sparse_buffers_[scaled_resolve_current_buffer_index_]->buffer();
+    }
+    return VK_NULL_HANDLE;
+  }
+  return scaled_resolve_buffer_;
 }
 
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
@@ -1433,12 +1468,16 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     uint64_t source_base_start;
     uint64_t source_base_range;
     if (texture_key.scaled_resolve) {
-      if (!GetScaledResolveRange(source_base_start_unscaled, vulkan_texture.GetGuestBaseSize(),
-                                 load_shader_info.source_bpe_log2, source_base_start,
-                                 source_base_range)) {
+      if (!MakeScaledResolveRangeCurrent(source_base_start_unscaled,
+                                         vulkan_texture.GetGuestBaseSize(),
+                                         load_shader_info.source_bpe_log2)) {
         return false;
       }
-      write_descriptor_set_source_base_buffer_info.buffer = scaled_resolve_buffer_;
+      write_descriptor_set_source_base_buffer_info.buffer = GetCurrentScaledResolveBuffer();
+      source_base_start =
+          GetCurrentScaledResolveRangeStartScaled() - GetCurrentScaledResolveBufferBaseOffset();
+      source_base_range = GetCurrentScaledResolveRangeLengthScaled();
+      UseScaledResolveBufferForRead();
     } else {
       source_base_start = source_base_start_unscaled;
       source_base_range = rex::align(uint64_t(vulkan_texture.GetGuestBaseSize()),
@@ -1473,12 +1512,16 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     uint64_t source_mips_start;
     uint64_t source_mips_range;
     if (texture_key.scaled_resolve) {
-      if (!GetScaledResolveRange(source_mips_start_unscaled, vulkan_texture.GetGuestMipsSize(),
-                                 load_shader_info.source_bpe_log2, source_mips_start,
-                                 source_mips_range)) {
+      if (!MakeScaledResolveRangeCurrent(source_mips_start_unscaled,
+                                         vulkan_texture.GetGuestMipsSize(),
+                                         load_shader_info.source_bpe_log2)) {
         return false;
       }
-      write_descriptor_set_source_mips_buffer_info.buffer = scaled_resolve_buffer_;
+      write_descriptor_set_source_mips_buffer_info.buffer = GetCurrentScaledResolveBuffer();
+      source_mips_start =
+          GetCurrentScaledResolveRangeStartScaled() - GetCurrentScaledResolveBufferBaseOffset();
+      source_mips_range = GetCurrentScaledResolveRangeLengthScaled();
+      UseScaledResolveBufferForRead();
     } else {
       source_mips_start = source_mips_start_unscaled;
       source_mips_range = rex::align(uint64_t(vulkan_texture.GetGuestMipsSize()),
@@ -2170,6 +2213,12 @@ bool VulkanTextureCache::InitializeScaledResolveBuffer() {
   uint64_t scale_area = uint64_t(draw_resolution_scale_x()) * uint64_t(draw_resolution_scale_y());
   scaled_resolve_buffer_size_ = uint64_t(SharedMemory::kBufferSize) * scale_area;
 
+  if (InitializeSparseScaledResolve() && sparse_scaled_resolve_supported_) {
+    scaled_resolve_last_usage_write_ = false;
+    scaled_resolve_last_written_range_ = std::make_pair(uint64_t(0), uint64_t(0));
+    return true;
+  }
+
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
@@ -2242,6 +2291,7 @@ void VulkanTextureCache::ShutdownScaledResolveBuffer() {
   const VkDevice device = vulkan_device->device();
 
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, scaled_resolve_buffer_);
+  ShutdownSparseScaledResolve();
   for (VkDeviceMemory memory : scaled_resolve_buffer_memory_) {
     dfn.vkFreeMemory(device, memory, nullptr);
   }
@@ -2251,6 +2301,9 @@ void VulkanTextureCache::ShutdownScaledResolveBuffer() {
   scaled_resolve_buffer_sparse_ = false;
   scaled_resolve_buffer_memory_type_ = UINT32_MAX;
   scaled_resolve_sparse_granularity_log2_ = UINT32_MAX;
+  scaled_resolve_current_buffer_index_ = UINT32_MAX;
+  scaled_resolve_current_range_start_scaled_ = 0;
+  scaled_resolve_current_range_length_scaled_ = 0;
   scaled_resolve_last_usage_write_ = false;
   scaled_resolve_last_written_range_ = std::make_pair(uint64_t(0), uint64_t(0));
 }
@@ -2285,6 +2338,226 @@ bool VulkanTextureCache::GetScaledResolveRange(uint32_t start_unscaled, uint32_t
 
   start_scaled_out = start_scaled;
   length_scaled_out = length_scaled;
+  return true;
+}
+
+size_t VulkanTextureCache::GetScaledResolveSparseBufferCount() const {
+  uint64_t address_space =
+      uint64_t(SharedMemory::kBufferSize) * draw_resolution_scale_x() * draw_resolution_scale_y();
+  if (address_space <= kScaledResolveSparseBufferSize) {
+    return 1;
+  }
+  return size_t((address_space - 1) >> 30);
+}
+
+std::array<size_t, 2> VulkanTextureCache::GetPossibleScaledResolveBufferIndices(
+    uint64_t address_scaled) const {
+  size_t gb_index = size_t(address_scaled >> 30);
+  size_t buffer_count = GetScaledResolveSparseBufferCount();
+  size_t max_buffer_index = buffer_count ? buffer_count - 1 : 0;
+  size_t buffer_a = std::min(gb_index, max_buffer_index);
+  size_t buffer_b = gb_index ? std::min(gb_index - 1, max_buffer_index) : max_buffer_index + 1;
+  return {buffer_a, buffer_b};
+}
+
+bool VulkanTextureCache::InitializeSparseScaledResolve() {
+  if (!IsDrawResolutionScaled()) {
+    return true;
+  }
+  if (!REXCVAR_GET(vulkan_sparse_shared_memory)) {
+    REXGPU_INFO("VulkanTextureCache: Sparse scaled resolve disabled by CVar");
+    return true;
+  }
+
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Properties& device_properties = vulkan_device->properties();
+  if (!device_properties.sparseBinding || !device_properties.sparseResidencyBuffer) {
+    REXGPU_INFO(
+        "VulkanTextureCache: Sparse binding is unavailable for scaled resolve; "
+        "using the legacy full-buffer path");
+    return true;
+  }
+
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  const size_t buffer_count = GetScaledResolveSparseBufferCount();
+  assert_true(buffer_count <= scaled_resolve_sparse_buffers_.size());
+
+  for (size_t i = 0; i < buffer_count; ++i) {
+    VkBufferCreateInfo buffer_create_info;
+    buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_create_info.pNext = nullptr;
+    buffer_create_info.flags =
+        VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+    buffer_create_info.size = kScaledResolveSparseBufferSize;
+    buffer_create_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    buffer_create_info.queueFamilyIndexCount = 0;
+    buffer_create_info.pQueueFamilyIndices = nullptr;
+
+    VkBuffer buffer = VK_NULL_HANDLE;
+    if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer) != VK_SUCCESS) {
+      REXGPU_WARN(
+          "VulkanTextureCache: Failed to create sparse scaled resolve buffer {}; "
+          "using the legacy full-buffer path",
+          i);
+      ShutdownSparseScaledResolve();
+      return true;
+    }
+    scaled_resolve_sparse_buffers_[i] = std::make_unique<ScaledResolveSparseBuffer>(buffer);
+  }
+
+  VkMemoryRequirements memory_requirements;
+  dfn.vkGetBufferMemoryRequirements(device, scaled_resolve_sparse_buffers_[0]->buffer(),
+                                    &memory_requirements);
+  if (!rex::bit_scan_forward(
+          memory_requirements.memoryTypeBits & vulkan_device->memory_types().device_local,
+          &scaled_resolve_buffer_memory_type_)) {
+    REXGPU_WARN(
+        "VulkanTextureCache: Failed to find sparse scaled resolve memory type; "
+        "using the legacy full-buffer path");
+    ShutdownSparseScaledResolve();
+    return true;
+  }
+
+  uint64_t address_space =
+      uint64_t(SharedMemory::kBufferSize) * draw_resolution_scale_x() * draw_resolution_scale_y();
+  uint32_t heap_count =
+      uint32_t((address_space + kScaledResolveHeapSize - 1) >> kScaledResolveHeapSizeLog2);
+  scaled_resolve_heaps_.assign(heap_count, VK_NULL_HANDLE);
+  scaled_resolve_heap_count_ = 0;
+  sparse_scaled_resolve_supported_ = true;
+  REXGPU_INFO("VulkanTextureCache: Sparse scaled resolve initialized with {} buffers",
+              buffer_count);
+  return true;
+}
+
+void VulkanTextureCache::ShutdownSparseScaledResolve() {
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  for (VkDeviceMemory heap : scaled_resolve_heaps_) {
+    if (heap != VK_NULL_HANDLE) {
+      dfn.vkFreeMemory(device, heap, nullptr);
+    }
+  }
+  scaled_resolve_heaps_.clear();
+  scaled_resolve_heap_count_ = 0;
+
+  for (auto& buffer : scaled_resolve_sparse_buffers_) {
+    if (buffer) {
+      dfn.vkDestroyBuffer(device, buffer->buffer(), nullptr);
+      buffer.reset();
+    }
+  }
+  sparse_scaled_resolve_supported_ = false;
+}
+
+void VulkanTextureCache::BindScaledResolveHeapToOverlappingBuffers(uint32_t heap_index,
+                                                                   VkDeviceMemory heap) {
+  uint64_t heap_address = uint64_t(heap_index) << kScaledResolveHeapSizeLog2;
+  auto buffer_indices = GetPossibleScaledResolveBufferIndices(heap_address);
+  size_t buffer_count = GetScaledResolveSparseBufferCount();
+  for (size_t buffer_index : buffer_indices) {
+    if (buffer_index >= buffer_count || !scaled_resolve_sparse_buffers_[buffer_index]) {
+      continue;
+    }
+    uint64_t buffer_base = uint64_t(buffer_index) << 30;
+    if (heap_address < buffer_base) {
+      continue;
+    }
+
+    VkSparseMemoryBind bind;
+    bind.resourceOffset = heap_address - buffer_base;
+    bind.size = kScaledResolveHeapSize;
+    bind.memory = heap;
+    bind.memoryOffset = 0;
+    bind.flags = 0;
+    command_processor_.SparseBindBuffer(
+        scaled_resolve_sparse_buffers_[buffer_index]->buffer(), 1, &bind,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+  }
+}
+
+bool VulkanTextureCache::EnsureScaledResolveMemoryCommittedSparse(
+    uint32_t start_unscaled, uint32_t length_unscaled, uint32_t length_scaled_alignment_log2) {
+  uint64_t start_scaled, length_scaled;
+  if (!GetScaledResolveRange(start_unscaled, length_unscaled, length_scaled_alignment_log2,
+                             start_scaled, length_scaled)) {
+    return false;
+  }
+  if (!length_scaled) {
+    return true;
+  }
+
+  uint64_t end_scaled = start_scaled + length_scaled;
+  uint32_t heap_first = uint32_t(start_scaled >> kScaledResolveHeapSizeLog2);
+  uint32_t heap_last = uint32_t((end_scaled - 1) >> kScaledResolveHeapSizeLog2);
+
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  for (uint32_t heap_index = heap_first; heap_index <= heap_last; ++heap_index) {
+    if (heap_index >= scaled_resolve_heaps_.size()) {
+      return false;
+    }
+    if (scaled_resolve_heaps_[heap_index] != VK_NULL_HANDLE) {
+      continue;
+    }
+
+    VkMemoryAllocateInfo memory_allocate_info;
+    memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memory_allocate_info.pNext = nullptr;
+    memory_allocate_info.allocationSize = kScaledResolveHeapSize;
+    memory_allocate_info.memoryTypeIndex = scaled_resolve_buffer_memory_type_;
+    VkDeviceMemory heap = VK_NULL_HANDLE;
+    if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &heap) != VK_SUCCESS) {
+      REXGPU_ERROR("VulkanTextureCache: Failed to allocate sparse scaled resolve heap {}",
+                   heap_index);
+      return false;
+    }
+    scaled_resolve_heaps_[heap_index] = heap;
+    ++scaled_resolve_heap_count_;
+    BindScaledResolveHeapToOverlappingBuffers(heap_index, heap);
+  }
+
+  return true;
+}
+
+bool VulkanTextureCache::MakeScaledResolveRangeCurrentSparse(
+    uint32_t start_unscaled, uint32_t length_unscaled, uint32_t length_scaled_alignment_log2) {
+  uint64_t start_scaled, length_scaled;
+  if (!GetScaledResolveRange(start_unscaled, length_unscaled, length_scaled_alignment_log2,
+                             start_scaled, length_scaled) ||
+      !EnsureScaledResolveMemoryCommittedSparse(start_unscaled, length_unscaled,
+                                                length_scaled_alignment_log2)) {
+    return false;
+  }
+  if (!length_scaled) {
+    return false;
+  }
+
+  uint64_t end_scaled = start_scaled + length_scaled;
+  auto start_buffers = GetPossibleScaledResolveBufferIndices(start_scaled);
+  auto end_buffers = GetPossibleScaledResolveBufferIndices(end_scaled - 1);
+  size_t chosen_buffer = SIZE_MAX;
+  if (start_buffers[0] == end_buffers[0] || start_buffers[0] == end_buffers[1]) {
+    chosen_buffer = start_buffers[0];
+  } else if (start_buffers[1] == end_buffers[0] || start_buffers[1] == end_buffers[1]) {
+    chosen_buffer = start_buffers[1];
+  }
+  if (chosen_buffer >= GetScaledResolveSparseBufferCount() ||
+      !scaled_resolve_sparse_buffers_[chosen_buffer]) {
+    REXGPU_ERROR("VulkanTextureCache: No scaled resolve sparse buffer covers [{:X}, {:X})",
+                 start_scaled, end_scaled);
+    return false;
+  }
+
+  scaled_resolve_current_buffer_index_ = uint32_t(chosen_buffer);
+  scaled_resolve_current_range_start_scaled_ = start_scaled;
+  scaled_resolve_current_range_length_scaled_ = length_scaled;
   return true;
 }
 
@@ -2353,7 +2626,8 @@ void VulkanTextureCache::GetScaledResolveUsageMasks(VkPipelineStageFlags& stage_
 }
 
 void VulkanTextureCache::UseScaledResolveBufferForRead() {
-  if (!scaled_resolve_buffer_) {
+  VkBuffer scaled_resolve_buffer = GetCurrentScaledResolveBuffer();
+  if (!scaled_resolve_buffer) {
     return;
   }
   if (!scaled_resolve_last_usage_write_ && !scaled_resolve_last_written_range_.second) {
@@ -2367,36 +2641,55 @@ void VulkanTextureCache::UseScaledResolveBufferForRead() {
   VkDeviceSize offset;
   VkDeviceSize size;
   if (!scaled_resolve_last_usage_write_) {
-    offset = VkDeviceSize(scaled_resolve_last_written_range_.first);
-    size = VkDeviceSize(scaled_resolve_last_written_range_.second);
+    uint64_t buffer_base = GetCurrentScaledResolveBufferBaseOffset();
+    if (scaled_resolve_last_written_range_.first < buffer_base) {
+      offset = 0;
+      size = VK_WHOLE_SIZE;
+    } else {
+      offset = VkDeviceSize(scaled_resolve_last_written_range_.first - buffer_base);
+      size = VkDeviceSize(scaled_resolve_last_written_range_.second);
+    }
   } else {
     offset = 0;
     size = VK_WHOLE_SIZE;
     scaled_resolve_last_usage_write_ = false;
   }
   command_processor_.PushBufferMemoryBarrier(
-      scaled_resolve_buffer_, offset, size, src_stage_mask, dst_stage_mask, src_access_mask,
+      scaled_resolve_buffer, offset, size, src_stage_mask, dst_stage_mask, src_access_mask,
       dst_access_mask, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
   scaled_resolve_last_written_range_ = std::make_pair(uint64_t(0), uint64_t(0));
 }
 
 void VulkanTextureCache::UseScaledResolveBufferForWrite(uint64_t written_start_scaled,
                                                         uint64_t written_length_scaled) {
-  if (!scaled_resolve_buffer_) {
+  VkBuffer scaled_resolve_buffer = GetCurrentScaledResolveBuffer();
+  if (!scaled_resolve_buffer) {
     return;
   }
-  if (written_start_scaled > scaled_resolve_buffer_size_) {
-    written_start_scaled = scaled_resolve_buffer_size_;
+  uint64_t buffer_base = GetCurrentScaledResolveBufferBaseOffset();
+  uint64_t buffer_size = sparse_scaled_resolve_supported_ ? kScaledResolveSparseBufferSize
+                                                          : scaled_resolve_buffer_size_;
+  if (written_start_scaled < buffer_base) {
+    written_length_scaled = 0;
+    written_start_scaled = buffer_base;
   }
-  written_length_scaled =
-      std::min(written_length_scaled, scaled_resolve_buffer_size_ - written_start_scaled);
+  uint64_t written_start_relative = written_start_scaled - buffer_base;
+  if (written_start_relative > buffer_size) {
+    written_start_relative = buffer_size;
+  }
+  written_start_scaled = buffer_base + written_start_relative;
+  written_length_scaled = std::min(written_length_scaled, buffer_size - written_start_relative);
 
   if (scaled_resolve_last_usage_write_ && scaled_resolve_last_written_range_.second) {
     VkPipelineStageFlags stage_mask;
     VkAccessFlags access_mask;
     GetScaledResolveUsageMasks(stage_mask, access_mask, true);
+    uint64_t last_written_start_relative =
+        scaled_resolve_last_written_range_.first > buffer_base
+            ? scaled_resolve_last_written_range_.first - buffer_base
+            : 0;
     command_processor_.PushBufferMemoryBarrier(
-        scaled_resolve_buffer_, VkDeviceSize(scaled_resolve_last_written_range_.first),
+        scaled_resolve_buffer, VkDeviceSize(last_written_start_relative),
         VkDeviceSize(scaled_resolve_last_written_range_.second), stage_mask, stage_mask,
         access_mask, access_mask, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
   } else if (!scaled_resolve_last_usage_write_) {
@@ -2405,7 +2698,7 @@ void VulkanTextureCache::UseScaledResolveBufferForWrite(uint64_t written_start_s
     GetScaledResolveUsageMasks(src_stage_mask, src_access_mask, false);
     GetScaledResolveUsageMasks(dst_stage_mask, dst_access_mask, true);
     command_processor_.PushBufferMemoryBarrier(
-        scaled_resolve_buffer_, 0, VK_WHOLE_SIZE, src_stage_mask, dst_stage_mask, src_access_mask,
+        scaled_resolve_buffer, 0, VK_WHOLE_SIZE, src_stage_mask, dst_stage_mask, src_access_mask,
         dst_access_mask, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
     scaled_resolve_last_usage_write_ = true;
   }

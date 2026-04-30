@@ -1437,10 +1437,13 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
         if (descriptor_set_dest != VK_NULL_HANDLE) {
           // Write the destination descriptor.
           VkDescriptorBufferInfo write_descriptor_set_dest_buffer_info;
-          write_descriptor_set_dest_buffer_info.buffer = draw_resolution_scaled
-                                                             ? texture_cache.scaled_resolve_buffer()
-                                                             : shared_memory.buffer();
-          write_descriptor_set_dest_buffer_info.offset = copy_dest_base;
+          write_descriptor_set_dest_buffer_info.buffer =
+              draw_resolution_scaled ? texture_cache.GetCurrentScaledResolveBuffer()
+                                     : shared_memory.buffer();
+          write_descriptor_set_dest_buffer_info.offset =
+              draw_resolution_scaled
+                  ? copy_dest_base - texture_cache.GetCurrentScaledResolveBufferBaseOffset()
+                  : copy_dest_base;
           write_descriptor_set_dest_buffer_info.range = copy_dest_range_length;
           VkWriteDescriptorSet write_descriptor_set_dest;
           write_descriptor_set_dest.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
