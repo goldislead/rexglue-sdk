@@ -13,7 +13,7 @@
 #include <rex/logging.h>
 #include <rex/ui/renderdoc_api.h>
 
-REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
+REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, true, "GPU",
                     "Allow invalid fetch constants");
 REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
 REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
@@ -33,10 +33,10 @@ REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
                     "like PIX and RenderDoc. Automatically enabled when "
                     "RenderDoc is detected.");
 
-REXCVAR_DEFINE_STRING(occlusion_query, "fake", "GPU",
+REXCVAR_DEFINE_STRING(occlusion_query, "fast", "GPU",
                       "Occlusion query mode.\n"
                       " fake: Always write fake sample counts (safe default)\n"
-                      " fast: Real GPU queries with speculative cached writes\n"
+                      " fast: Real GPU queries with speculative cached writes (default)\n"
                       " strict: Real GPU queries, waits for writeback (may stall)")
     .allowed({"fake", "fast", "strict"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

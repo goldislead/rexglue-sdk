@@ -45,12 +45,12 @@ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
 REXCVAR_DEFINE_BOOL(occlusion_query_enable, true, "GPU", "Enable host occlusion query handling")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
+REXCVAR_DEFINE_STRING(readback_resolve, "fast", "GPU",
                       "Controls CPU readback of render-to-texture resolve results.\n"
-                      " none: Disable readback (default)\n"
-                      " fast: Read previous frame (delayed, copy every frame)\n"
+                      " fast: Read previous frame (delayed, copy every frame, default)\n"
                       " some: Read previous frame (delayed, copy on cache miss)\n"
-                      " full: Immediate sync readback (accurate but stalls)")
+                      " full: Immediate sync readback (accurate but stalls)\n"
+                      " none: Disable readback completely")
     .allowed({"none", "fast", "some", "full"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
@@ -87,16 +87,16 @@ using namespace rex::graphics::xenos;
 namespace {
 
 ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
-  if (value == "fast") {
-    return ReadbackResolveMode::kFast;
+  if (value == "full") {
+    return ReadbackResolveMode::kFull;
   }
   if (value == "some") {
     return ReadbackResolveMode::kSome;
   }
-  if (value == "full") {
-    return ReadbackResolveMode::kFull;
+  if (value == "none") {
+    return ReadbackResolveMode::kDisabled;
   }
-  return ReadbackResolveMode::kDisabled;
+  return ReadbackResolveMode::kFast;
 }
 
 ZPDMode ParseZPDMode() {

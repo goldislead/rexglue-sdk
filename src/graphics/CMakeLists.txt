@@ -56,6 +56,7 @@ set(REXGRAPHICS_VULKAN_SOURCES
     vulkan/shader.cpp
     vulkan/shared_memory.cpp
     vulkan/texture_cache.cpp
+    vulkan/zpd_query_pool.cpp
 )
 
 # D3D12 backend
@@ -149,4 +150,3 @@ if(REXGLUE_USE_D3D12)
     )
     target_compile_definitions(rexgraphics PUBLIC REX_HAS_D3D12=1)
 endif()
-

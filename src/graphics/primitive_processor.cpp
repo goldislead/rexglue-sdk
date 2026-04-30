@@ -37,7 +37,7 @@ REXCVAR_DEFINE_BOOL(force_convert_quad_lists_to_triangle_lists, false, "GPU",
 REXCVAR_DEFINE_BOOL(force_convert_triangle_fans_to_lists, false, "GPU",
                     "Force convert triangle fans to lists");
 
-REXCVAR_DEFINE_INT32(primitive_processor_cache_min_indices, 0, "GPU",
+REXCVAR_DEFINE_INT32(primitive_processor_cache_min_indices, 4096, "GPU",
                      "Minimum indices for primitive processor cache")
     .range(0, 1000000);
 
