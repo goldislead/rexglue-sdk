@@ -631,6 +631,18 @@ void VulkanCommandProcessor::InsertDebugMarker(const char* format, ...) {
   deferred_command_buffer_.CmdVkInsertDebugUtilsLabelEXT(label);
 }
 
+void VulkanCommandProcessor::PrepareForWait() {
+  // Refresh completion data so PumpPendingRetire in the base class sees the
+  // latest GPU progress before blocking.
+  CheckSubmissionFenceAndDeviceLoss(GetCompletedSubmission());
+  CommandProcessor::PrepareForWait();
+}
+
+void VulkanCommandProcessor::ReturnFromWait() {
+  CheckSubmissionFenceAndDeviceLoss(GetCompletedSubmission());
+  CommandProcessor::ReturnFromWait();
+}
+
 void VulkanCommandProcessor::ClearCaches() {
   CommandProcessor::ClearCaches();
   InvalidateAllVertexBufferResidency();

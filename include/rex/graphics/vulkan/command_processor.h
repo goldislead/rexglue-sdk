@@ -142,6 +142,9 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void RestoreEdramSnapshot(const void* snapshot) override;
 
+  void PrepareForWait() override;
+  void ReturnFromWait() override;
+
   void PushDebugMarker(const char* format, ...);
   void PopDebugMarker();
   void InsertDebugMarker(const char* format, ...);
