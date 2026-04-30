@@ -50,6 +50,11 @@ REXCVAR_DEFINE_BOOL(spirv_disable_rounding_mode_rte, false, "GPU/Vulkan",
                     "do not support the capability")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(vulkan_precise_interpolation, true, "GPU/Vulkan",
+                    "Use manual barycentric interpolation in Vulkan fragment "
+                    "shaders when supported")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_STRING(occlusion_query, "fast", "GPU",
                       "Occlusion query mode.\n"
                       " fake: Always write fake sample counts (safe default)\n"

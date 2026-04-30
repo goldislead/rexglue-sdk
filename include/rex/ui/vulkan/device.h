@@ -159,6 +159,11 @@ class VulkanDevice {
 
     bool nonSeamlessCubeMap = false;
 
+    // VK_KHR_fragment_shader_barycentric (#322) or
+    // VK_NV_fragment_shader_barycentric (#203)
+
+    bool fragmentShaderBarycentric = false;
+
     // VK_EXT_custom_border_color
 
     bool customBorderColors = false;
@@ -204,6 +209,8 @@ class VulkanDevice {
     bool ext_1_3_KHR_maintenance4 = false;  // #414
     // Has optional features not implied by this being true.
     bool ext_1_3_KHR_dynamic_rendering = false;  // #55
+    // Has optional features not implied by this being true.
+    bool ext_KHR_fragment_shader_barycentric = false;  // #322 / #203
   };
 
   const Extensions& extensions() const { return extensions_; }

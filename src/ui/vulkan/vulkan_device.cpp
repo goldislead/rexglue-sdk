@@ -208,6 +208,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   bool ext_1_3_EXT_shader_demote_to_helper_invocation = false;
   bool ext_1_3_KHR_dynamic_rendering = false;
   bool ext_EXT_non_seamless_cube_map = false;
+  bool ext_KHR_fragment_shader_barycentric = false;
+  bool ext_NV_fragment_shader_barycentric = false;
   if (with_gpu_emulation) {
     // #15.
     XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION(KHR_sampler_mirror_clamp_to_edge, 1, 2)
@@ -232,6 +234,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION(EXT_shader_demote_to_helper_invocation, 1, 3)
       // #423.
       XE_UI_VULKAN_LOCAL_EXTENSION(EXT_non_seamless_cube_map)
+      // #322 (KHR) / #203 (NV).
+      XE_UI_VULKAN_LOCAL_EXTENSION(KHR_fragment_shader_barycentric)
+      XE_UI_VULKAN_LOCAL_EXTENSION(NV_fragment_shader_barycentric)
       // Required for non-black YCbCr border color parity with D3D12.
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_custom_border_color)
       // Required for true null descriptors in bindless texture bindings.
@@ -330,6 +335,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VulkanFeatures<VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT>
       features_EXT_non_seamless_cube_map;
+  VulkanFeatures<VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR>
+      features_KHR_fragment_shader_barycentric;
   VulkanFeatures<VkPhysicalDeviceCustomBorderColorFeaturesEXT,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT>
       features_EXT_custom_border_color;
@@ -373,6 +381,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
     if (ext_EXT_non_seamless_cube_map) {
       features_EXT_non_seamless_cube_map.Link(supported_features_2, device_create_info);
+    }
+    if (ext_KHR_fragment_shader_barycentric || ext_NV_fragment_shader_barycentric) {
+      features_KHR_fragment_shader_barycentric.Link(supported_features_2, device_create_info);
     }
     if (device->extensions_.ext_EXT_custom_border_color) {
       features_EXT_custom_border_color.Link(supported_features_2, device_create_info);
@@ -726,6 +737,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_FEATURE_2(features_EXT_non_seamless_cube_map, nonSeamlessCubeMap)
     }
   }
+
+  if (ext_KHR_fragment_shader_barycentric || ext_NV_fragment_shader_barycentric) {
+    if (with_gpu_emulation) {
+      XE_UI_VULKAN_FEATURE_2(features_KHR_fragment_shader_barycentric, fragmentShaderBarycentric)
+    }
+  }
+  device->extensions_.ext_KHR_fragment_shader_barycentric =
+      ext_KHR_fragment_shader_barycentric || ext_NV_fragment_shader_barycentric;
 
   if (device->extensions_.ext_EXT_custom_border_color) {
     if (with_gpu_emulation) {
