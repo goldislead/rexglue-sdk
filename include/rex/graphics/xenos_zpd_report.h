@@ -33,13 +33,9 @@ struct XenosZPDReport {
   static constexpr uint32_t kBatchPageSizeBytes = 0x1000;
   static constexpr uint32_t kBatchPageAlignMask = ~(kBatchPageSizeBytes - 1);
 
-  static constexpr uint32_t GetRecordBase(uint32_t address) {
-    return address & kRecordAlignMask;
-  }
+  static constexpr uint32_t GetRecordBase(uint32_t address) { return address & kRecordAlignMask; }
 
-  static constexpr uint32_t GetSlotBase(uint32_t address) {
-    return address & kSlotAlignMask;
-  }
+  static constexpr uint32_t GetSlotBase(uint32_t address) { return address & kSlotAlignMask; }
 
   static constexpr uint32_t GetBatchPageBase(uint32_t address) {
     return GetRecordBase(address) & kBatchPageAlignMask;
@@ -49,9 +45,7 @@ struct XenosZPDReport {
     return GetSlotBase(address) + kRecordSizeBytes;
   }
 
-  static constexpr uint32_t GetEndRecordBase(uint32_t address) {
-    return GetSlotBase(address);
-  }
+  static constexpr uint32_t GetEndRecordBase(uint32_t address) { return GetSlotBase(address); }
 
   static constexpr bool IsBeginRecord(uint32_t address) {
     uint32_t record_base = GetRecordBase(address);
@@ -64,17 +58,14 @@ struct XenosZPDReport {
   }
 
   // Checks for the 0x20 checkpoint walk batched titles use in one page.
-  static constexpr bool IsBatchStep(uint32_t last_record_base,
-                                    uint32_t record_base) {
-    return last_record_base != 0 &&
-           record_base == last_record_base + kRecordSizeBytes;
+  static constexpr bool IsBatchStep(uint32_t last_record_base, uint32_t record_base) {
+    return last_record_base != 0 && record_base == last_record_base + kRecordSizeBytes;
   }
 
   // Boundary detection only looks at ZPass_A first, then ZFail_A.
   // Some titles (4D5307E8) have unique, non-zero values in the B fields, which
   // aren't understood well enough to count them yet.
-  static bool HasPendingSentinel(
-      const xenos::xe_gpu_depth_sample_counts* report) {
+  static bool HasPendingSentinel(const xenos::xe_gpu_depth_sample_counts* report) {
     constexpr uint32_t kSentinelLE = 0xEDFEFFFFu;
     constexpr uint32_t kSentinelBE = 0xFFFFFEEDu;
 
@@ -89,8 +80,7 @@ struct XenosZPDReport {
 
   // Total_A mirrors ZPass_A and the rest are zeroed out since host queries can
   // only provide a passing count. This is still enough to satisfy most titles.
-  static void WriteSampleCount(xenos::xe_gpu_depth_sample_counts* report,
-                               uint32_t sample_count) {
+  static void WriteSampleCount(xenos::xe_gpu_depth_sample_counts* report, uint32_t sample_count) {
     sample_count = SaturateSampleCount(sample_count);
 
     report->Total_A = sample_count;
@@ -105,8 +95,7 @@ struct XenosZPDReport {
 
   static uint32_t SaturateSampleCount(uint32_t sample_count) {
     double saturation = std::clamp(
-        static_cast<double>(REXCVAR_GET(occlusion_query_sample_count_saturation)),
-        0.0, 1.0);
+        static_cast<double>(REXCVAR_GET(occlusion_query_sample_count_saturation)), 0.0, 1.0);
 
     if (sample_count == 0 || saturation >= 1.0) {
       return sample_count;
@@ -124,10 +113,9 @@ struct XenosZPDReport {
     }
 
     const double attenuation = 1.0 - saturation;
-    const double exponent = 1.0 - (1.0 - 0.35) * (attenuation * attenuation *
-                                                  (3.0 - 2.0 * attenuation));
-    double saturated_count =
-        knee + std::pow(static_cast<double>(sample_count) - knee, exponent);
+    const double exponent =
+        1.0 - (1.0 - 0.35) * (attenuation * attenuation * (3.0 - 2.0 * attenuation));
+    double saturated_count = knee + std::pow(static_cast<double>(sample_count) - knee, exponent);
 
     return static_cast<uint32_t>(saturated_count + 0.5);
   }
@@ -139,13 +127,10 @@ struct XenosZPDReport {
   }
 
   static void WriteReportDelta(xenos::xe_gpu_depth_sample_counts* begin_report,
-                               xenos::xe_gpu_depth_sample_counts* end_report,
-                               uint32_t begin_value, uint32_t delta_value,
-                               bool write_begin_report) {
-    uint64_t end_value =
-        static_cast<uint64_t>(begin_value) + static_cast<uint64_t>(delta_value);
-    uint32_t clamped_value =
-        end_value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(end_value);
+                               xenos::xe_gpu_depth_sample_counts* end_report, uint32_t begin_value,
+                               uint32_t delta_value, bool write_begin_report) {
+    uint64_t end_value = static_cast<uint64_t>(begin_value) + static_cast<uint64_t>(delta_value);
+    uint32_t clamped_value = end_value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(end_value);
 
     if (write_begin_report && begin_report && end_report != begin_report) {
       WriteSampleCount(begin_report, begin_value);

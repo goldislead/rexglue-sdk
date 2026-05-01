@@ -44,8 +44,8 @@ class VulkanZPDQueryPool {
   VulkanZPDQueryPool& operator=(const VulkanZPDQueryPool&) = delete;
   ~VulkanZPDQueryPool() { Shutdown(); }
 
-  bool EnsureInitialized(const ui::vulkan::VulkanDevice* vulkan_device,
-                         uint32_t requested_capacity, bool can_recreate);
+  bool EnsureInitialized(const ui::vulkan::VulkanDevice* vulkan_device, uint32_t requested_capacity,
+                         bool can_recreate);
   void Shutdown();
 
   bool is_initialized() const {
