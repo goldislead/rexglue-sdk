@@ -65,6 +65,7 @@ class PipelineCache {
 
   void EndSubmission();
   bool IsCreatingPipelines();
+  void AwaitPipelineCompletion();
 
   D3D12Shader* LoadShader(xenos::ShaderType shader_type, const uint32_t* host_address,
                           uint32_t dword_count);
