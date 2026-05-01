@@ -14,8 +14,8 @@
 #include <algorithm>
 
 #include <rex/assert.h>
-#include <rex/dbg.h>
 #include <rex/graphics/d3d12/deferred_command_list.h>
+#include <rex/logging.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/d3d12/d3d12_util.h>
 

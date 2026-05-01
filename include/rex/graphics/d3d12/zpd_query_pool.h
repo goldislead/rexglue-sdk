@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <vector>
 
-#include <rex/graphics/command_processor.h>
 #include <rex/ui/d3d12/d3d12_api.h>
 
 namespace rex::ui::d3d12 {

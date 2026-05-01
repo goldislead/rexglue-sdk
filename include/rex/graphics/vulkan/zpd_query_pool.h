@@ -1,4 +1,3 @@
-#pragma once
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -9,6 +8,8 @@
  *
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
+
+#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -28,7 +29,8 @@ class DeferredCommandBuffer;
 // vkCmdBeginQuery is only valid inside a render pass, queries get deferred
 // when no pass is open and segments split at pass boundaries.
 // Requires VK_EXT_host_query_reset (1.2 core) so slots can be reset on the
-// CPU at release time, no paired vkCmdEndQuery needed.
+// CPU at release time, no paired vkCmdEndQuery needed, and also allows
+// DiscardZPDQuery work outside a pass.
 //
 // VK_QUERY_RESULT_WAIT_BIT in the copy removes the need for a separate
 // availability check. Transfer barrier before InvalidateReadback covers non-
