@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -258,16 +259,30 @@ void KernelState::SetLoadedAchievements(std::vector<AchievementInfo> achievement
   REXSYS_INFO("Achievement store: loaded {} entries", loaded_achievements_.size());
 }
 
+namespace {
+// Returns current time as FILETIME (100-ns intervals since 1601-01-01).
+uint64_t CurrentFileTime() {
+  using namespace std::chrono;
+  auto now = system_clock::now().time_since_epoch();
+  auto intervals = duration_cast<duration<int64_t, std::ratio<1, 10'000'000>>>(now);
+  // Offset from Unix epoch (1970-01-01) to FILETIME epoch (1601-01-01) in 100-ns units.
+  constexpr uint64_t kEpochDelta = 116'444'736'000'000'000ULL;
+  return static_cast<uint64_t>(intervals.count()) + kEpochDelta;
+}
+}  // namespace
+
 void KernelState::RegisterAchievementUnlockCallback(AchievementUnlockCallback cb) {
   std::lock_guard<std::mutex> lock(achievement_mutex_);
   unlock_callbacks_.push_back(std::move(cb));
 }
 
 void KernelState::UnlockAchievement(uint32_t id) {
+  uint64_t filetime = CurrentFileTime();
   bool newly_unlocked = false;
   {
     std::lock_guard<std::mutex> lock(achievement_mutex_);
-    newly_unlocked = unlocked_achievement_ids_.insert(id).second;
+    auto [it, inserted] = unlocked_achievements_.emplace(id, filetime);
+    newly_unlocked = inserted;
   }
   if (!newly_unlocked) {
     return;
@@ -275,7 +290,6 @@ void KernelState::UnlockAchievement(uint32_t id) {
   REXSYS_INFO("Achievement unlocked: {:08X}", id);
   SaveUnlockState();
 
-  // Find the matching AchievementInfo (loaded_achievements_ is immutable after boot).
   const AchievementInfo* info = nullptr;
   for (const auto& a : loaded_achievements_) {
     if (a.id == id) { info = &a; break; }
@@ -292,7 +306,13 @@ void KernelState::UnlockAchievement(uint32_t id) {
 
 bool KernelState::IsAchievementUnlocked(uint32_t id) const {
   std::lock_guard<std::mutex> lock(achievement_mutex_);
-  return unlocked_achievement_ids_.count(id) > 0;
+  return unlocked_achievements_.count(id) > 0;
+}
+
+uint64_t KernelState::GetAchievementUnlockTime(uint32_t id) const {
+  std::lock_guard<std::mutex> lock(achievement_mutex_);
+  auto it = unlocked_achievements_.find(id);
+  return it != unlocked_achievements_.end() ? it->second : 0;
 }
 
 const std::vector<AchievementInfo>& KernelState::loaded_achievements() const {
@@ -307,14 +327,11 @@ void KernelState::SaveUnlockState() const {
   std::error_code ec;
   std::filesystem::create_directories(unlock_save_path_.parent_path(), ec);
 
-  std::string content = "# Achievement unlock state — managed by ReXGlue runtime\nunlocked = [";
-  bool first = true;
-  for (uint32_t id : unlocked_achievement_ids_) {
-    if (!first) content += ", ";
-    content += std::to_string(id);
-    first = false;
+  // Each entry: id = <filetime>
+  std::string content = "# Achievement unlock state — managed by ReXGlue runtime\n\n";
+  for (const auto& [id, filetime] : unlocked_achievements_) {
+    content += fmt::format("[unlocked.{}]\nfiletime = {}\n\n", id, filetime);
   }
-  content += "]\n";
 
   std::filesystem::path tmp = unlock_save_path_;
   tmp += ".tmp";
@@ -338,16 +355,21 @@ void KernelState::LoadUnlockState() {
   }
   try {
     auto tbl = toml::parse_file(unlock_save_path_.string());
-    if (auto* arr = tbl["unlocked"].as_array()) {
-      std::lock_guard<std::mutex> lock(achievement_mutex_);
-      for (const auto& node : *arr) {
-        if (auto v = node.value<int64_t>()) {
-          unlocked_achievement_ids_.insert(static_cast<uint32_t>(*v));
-        }
-      }
-      REXSYS_INFO("Loaded {} persisted unlocks from {}",
-                  unlocked_achievement_ids_.size(), unlock_save_path_.string());
+    const auto* unlocked_tbl = tbl["unlocked"].as_table();
+    if (!unlocked_tbl) {
+      return;
     }
+    std::lock_guard<std::mutex> lock(achievement_mutex_);
+    for (const auto& [key, val] : *unlocked_tbl) {
+      uint32_t id = static_cast<uint32_t>(std::stoul(std::string(key.str())));
+      uint64_t filetime = 0;
+      if (const auto* entry = val.as_table()) {
+        filetime = static_cast<uint64_t>((*entry)["filetime"].value_or<int64_t>(0));
+      }
+      unlocked_achievements_.emplace(id, filetime);
+    }
+    REXSYS_INFO("Loaded {} persisted unlocks from {}",
+                unlocked_achievements_.size(), unlock_save_path_.string());
   } catch (const toml::parse_error& e) {
     REXSYS_WARN("Failed to parse unlock save {}: {}", unlock_save_path_.string(), e.what());
   }

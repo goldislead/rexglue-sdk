@@ -327,6 +327,8 @@ class KernelState {
   void SetLoadedAchievements(std::vector<AchievementInfo> achievements);
   void UnlockAchievement(uint32_t id);
   bool IsAchievementUnlocked(uint32_t id) const;
+  // Returns the unlock FILETIME (100-ns intervals since 1601-01-01), or 0 if locked.
+  uint64_t GetAchievementUnlockTime(uint32_t id) const;
   const std::vector<AchievementInfo>& loaded_achievements() const;
 
   using AchievementUnlockCallback = std::function<void(const AchievementInfo&)>;
@@ -385,7 +387,8 @@ class KernelState {
   uint32_t kernel_guest_globals_ = 0;
 
   std::vector<AchievementInfo> loaded_achievements_;
-  std::unordered_set<uint32_t> unlocked_achievement_ids_;
+  // Maps achievement ID → FILETIME of unlock (100-ns intervals since 1601-01-01).
+  std::unordered_map<uint32_t, uint64_t> unlocked_achievements_;
   mutable std::mutex achievement_mutex_;
   std::filesystem::path unlock_save_path_;
   std::vector<AchievementUnlockCallback> unlock_callbacks_;

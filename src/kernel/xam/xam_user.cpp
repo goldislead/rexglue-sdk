@@ -622,9 +622,24 @@ u32 XamUserCreateAchievementEnumerator_entry(u32 title_id, u32 user_index, u32 x
     return result;
   }
 
+  // ACHIEVED | ACHIEVED_ONLINE flags the game checks to consider an achievement earned.
+  constexpr uint32_t kAchievedFlags = 0x00030000;
+
+  auto fill_unlock = [](XStaticAchievementEnumerator::AchievementDetails& item,
+                        uint32_t id, const rex::system::KernelState* ks) {
+    uint64_t ft = ks->GetAchievementUnlockTime(id);
+    if (ft) {
+      item.flags |= kAchievedFlags;
+      item.unlock_time.unk_0 = static_cast<uint32_t>(ft & 0xFFFF'FFFF);
+      item.unlock_time.unk_4 = static_cast<uint32_t>(ft >> 32);
+    }
+  };
+
+  const auto* ks = REX_KERNEL_STATE();
+
   // Prefer the runtime store (populated from TOML or XDBF at boot) so that
   // dev-edited labels/descriptions are visible to the game's own queries.
-  const auto& store = REX_KERNEL_STATE()->loaded_achievements();
+  const auto& store = ks->loaded_achievements();
   if (!store.empty()) {
     for (const auto& info : store) {
       auto item = XStaticAchievementEnumerator::AchievementDetails{
@@ -636,10 +651,11 @@ u32 XamUserCreateAchievementEnumerator_entry(u32 title_id, u32 user_index, u32 x
           info.gamerscore,
           {0, 0},
           info.flags};
+      fill_unlock(item, info.id, ks);
       e->AppendItem(item);
     }
   } else {
-    const util::XdbfGameData db = REX_KERNEL_STATE()->title_xdbf();
+    const util::XdbfGameData db = ks->title_xdbf();
     if (db.is_valid()) {
       const XLanguage language =
           db.GetExistingLanguage(static_cast<XLanguage>(REXCVAR_GET(user_language)));
@@ -653,6 +669,7 @@ u32 XamUserCreateAchievementEnumerator_entry(u32 title_id, u32 user_index, u32 x
             entry.gamerscore,
             {0, 0},
             entry.flags};
+        fill_unlock(item, entry.id, ks);
         e->AppendItem(item);
       }
     }
