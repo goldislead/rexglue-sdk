@@ -456,6 +456,48 @@ Result<void> InitAchievements(const InitAchievementsOptions& opts, const CliCont
   }
 
   REXLOG_INFO("Wrote {} achievements to {}", achievements.size(), outPath.string());
+
+  // ---- Icons ---------------------------------------------------------------
+  fs::path iconsDir = outDir / "icons";
+  fs::create_directories(iconsDir, ec);
+  if (ec) {
+    REXLOG_WARN("Could not create icons directory: {}", ec.message());
+  } else {
+    int icons_written = 0;
+    int icons_missing = 0;
+    std::vector<uint32_t> seen;
+
+    for (const auto& entry : achievements) {
+      uint32_t img_id = entry.image_id;
+      if (std::find(seen.begin(), seen.end(), img_id) != seen.end()) continue;
+      seen.push_back(img_id);
+
+      auto block = db.GetEntry(rex::system::util::XdbfSection::kImage,
+                               static_cast<uint64_t>(img_id));
+      if (!block || !block.buffer || block.size == 0) {
+        ++icons_missing;
+        continue;
+      }
+
+      fs::path icon_path = iconsDir / fmt::format("{}.png", img_id);
+      std::ofstream f(icon_path, std::ios::binary);
+      if (!f) {
+        REXLOG_WARN("Cannot write icon {}", icon_path.string());
+        continue;
+      }
+      f.write(reinterpret_cast<const char*>(block.buffer),
+              static_cast<std::streamsize>(block.size));
+      if (f.good()) ++icons_written;
+    }
+
+    if (icons_written > 0) {
+      REXLOG_INFO("Wrote {} icon(s) to {}", icons_written, iconsDir.string());
+    }
+    if (icons_missing > 0) {
+      REXLOG_WARN("{} achievement(s) had no icon in XDBF", icons_missing);
+    }
+  }
+
   return Ok();
 }
 
