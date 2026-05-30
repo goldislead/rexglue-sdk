@@ -622,25 +622,39 @@ u32 XamUserCreateAchievementEnumerator_entry(u32 title_id, u32 user_index, u32 x
     return result;
   }
 
-  const util::XdbfGameData db = REX_KERNEL_STATE()->title_xdbf();
-
-  if (db.is_valid()) {
-    const XLanguage language =
-        db.GetExistingLanguage(static_cast<XLanguage>(REXCVAR_GET(user_language)));
-    const std::vector<util::XdbfAchievementTableEntry> achievement_list = db.GetAchievements();
-
-    for (const util::XdbfAchievementTableEntry& entry : achievement_list) {
+  // Prefer the runtime store (populated from TOML or XDBF at boot) so that
+  // dev-edited labels/descriptions are visible to the game's own queries.
+  const auto& store = REX_KERNEL_STATE()->loaded_achievements();
+  if (!store.empty()) {
+    for (const auto& info : store) {
       auto item = XStaticAchievementEnumerator::AchievementDetails{
-          entry.id,
-          rex::string::to_utf16(db.GetStringTableEntry(language, entry.label_id)),
-          rex::string::to_utf16(db.GetStringTableEntry(language, entry.description_id)),
-          rex::string::to_utf16(db.GetStringTableEntry(language, entry.unachieved_id)),
-          entry.image_id,
-          entry.gamerscore,
+          info.id,
+          rex::string::to_utf16(info.label),
+          rex::string::to_utf16(info.description),
+          rex::string::to_utf16(info.unachieved_description),
+          info.image_id,
+          info.gamerscore,
           {0, 0},
-          entry.flags};
-
+          info.flags};
       e->AppendItem(item);
+    }
+  } else {
+    const util::XdbfGameData db = REX_KERNEL_STATE()->title_xdbf();
+    if (db.is_valid()) {
+      const XLanguage language =
+          db.GetExistingLanguage(static_cast<XLanguage>(REXCVAR_GET(user_language)));
+      for (const util::XdbfAchievementTableEntry& entry : db.GetAchievements()) {
+        auto item = XStaticAchievementEnumerator::AchievementDetails{
+            entry.id,
+            rex::string::to_utf16(db.GetStringTableEntry(language, entry.label_id)),
+            rex::string::to_utf16(db.GetStringTableEntry(language, entry.description_id)),
+            rex::string::to_utf16(db.GetStringTableEntry(language, entry.unachieved_id)),
+            entry.image_id,
+            entry.gamerscore,
+            {0, 0},
+            entry.flags};
+        e->AppendItem(item);
+      }
     }
   }
 

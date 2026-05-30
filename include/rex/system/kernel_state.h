@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <filesystem>
 #include <functional>
 #include <list>
 #include <memory>
@@ -337,6 +338,8 @@ class KernelState {
   void SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uint32_t tls_data_size,
                          uint32_t tls_raw_data_address);
   void LoadAchievementsData();
+  void SaveUnlockState() const;
+  void LoadUnlockState();
 
   Runtime* emulator_;
   memory::Memory* memory_;
@@ -380,6 +383,8 @@ class KernelState {
 
   std::vector<AchievementInfo> loaded_achievements_;
   std::unordered_set<uint32_t> unlocked_achievement_ids_;
+  mutable std::mutex achievement_mutex_;
+  std::filesystem::path unlock_save_path_;
 
   std::atomic<bool> dispatch_thread_running_;
   std::atomic<bool> terminating_title_{false};

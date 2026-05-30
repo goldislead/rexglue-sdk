@@ -259,10 +259,19 @@ void KernelState::SetLoadedAchievements(std::vector<AchievementInfo> achievement
 }
 
 void KernelState::UnlockAchievement(uint32_t id) {
-  unlocked_achievement_ids_.insert(id);
+  bool newly_unlocked = false;
+  {
+    std::lock_guard<std::mutex> lock(achievement_mutex_);
+    newly_unlocked = unlocked_achievement_ids_.insert(id).second;
+  }
+  if (newly_unlocked) {
+    REXSYS_INFO("Achievement unlocked: {:08X}", id);
+    SaveUnlockState();
+  }
 }
 
 bool KernelState::IsAchievementUnlocked(uint32_t id) const {
+  std::lock_guard<std::mutex> lock(achievement_mutex_);
   return unlocked_achievement_ids_.count(id) > 0;
 }
 
@@ -270,16 +279,80 @@ const std::vector<AchievementInfo>& KernelState::loaded_achievements() const {
   return loaded_achievements_;
 }
 
+void KernelState::SaveUnlockState() const {
+  if (unlock_save_path_.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(achievement_mutex_);
+  std::error_code ec;
+  std::filesystem::create_directories(unlock_save_path_.parent_path(), ec);
+
+  std::string content = "# Achievement unlock state — managed by ReXGlue runtime\nunlocked = [";
+  bool first = true;
+  for (uint32_t id : unlocked_achievement_ids_) {
+    if (!first) content += ", ";
+    content += std::to_string(id);
+    first = false;
+  }
+  content += "]\n";
+
+  std::filesystem::path tmp = unlock_save_path_;
+  tmp += ".tmp";
+  {
+    std::ofstream f(tmp, std::ios::binary);
+    if (!f) {
+      REXSYS_WARN("Achievement save: cannot write {}", tmp.string());
+      return;
+    }
+    f << content;
+  }
+  std::filesystem::rename(tmp, unlock_save_path_, ec);
+  if (ec) {
+    REXSYS_WARN("Achievement save: rename failed: {}", ec.message());
+  }
+}
+
+void KernelState::LoadUnlockState() {
+  if (unlock_save_path_.empty() || !std::filesystem::exists(unlock_save_path_)) {
+    return;
+  }
+  try {
+    auto tbl = toml::parse_file(unlock_save_path_.string());
+    if (auto* arr = tbl["unlocked"].as_array()) {
+      std::lock_guard<std::mutex> lock(achievement_mutex_);
+      for (const auto& node : *arr) {
+        if (auto v = node.value<int64_t>()) {
+          unlocked_achievement_ids_.insert(static_cast<uint32_t>(*v));
+        }
+      }
+      REXSYS_INFO("Loaded {} persisted unlocks from {}",
+                  unlocked_achievement_ids_.size(), unlock_save_path_.string());
+    }
+  } catch (const toml::parse_error& e) {
+    REXSYS_WARN("Failed to parse unlock save {}: {}", unlock_save_path_.string(), e.what());
+  }
+}
+
 void KernelState::LoadAchievementsData() {
   std::vector<AchievementInfo> achievements;
 
+  // Search order: game_data_root/metadata/, parent/metadata/, game_data_root/
   const auto& root = emulator_->game_data_root();
-  std::filesystem::path toml_path = root / "metadata" / "achievements.toml";
-  if (!std::filesystem::exists(toml_path)) {
-    toml_path = root / "achievements.toml";
+  const std::filesystem::path candidates[] = {
+      root / "metadata" / "achievements.toml",
+      root.parent_path() / "metadata" / "achievements.toml",
+      root / "achievements.toml",
+  };
+
+  std::filesystem::path toml_path;
+  for (const auto& p : candidates) {
+    if (std::filesystem::exists(p)) {
+      toml_path = p;
+      break;
+    }
   }
 
-  if (std::filesystem::exists(toml_path)) {
+  if (!toml_path.empty()) {
     try {
       auto tbl = toml::parse_file(toml_path.string());
       if (auto* arr = tbl["achievements"].as_array()) {
@@ -325,6 +398,15 @@ void KernelState::LoadAchievementsData() {
   }
 
   SetLoadedAchievements(std::move(achievements));
+
+  // Set up the unlock save path and restore persisted state.
+  const auto user_root = emulator_->user_data_root();
+  if (!user_root.empty()) {
+    unlock_save_path_ =
+        user_root / "achievements" /
+        fmt::format("{:08X}.toml", title_id());
+    LoadUnlockState();
+  }
 }
 
 uint32_t KernelState::process_type() const {
