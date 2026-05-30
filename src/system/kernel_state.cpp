@@ -258,15 +258,35 @@ void KernelState::SetLoadedAchievements(std::vector<AchievementInfo> achievement
   REXSYS_INFO("Achievement store: loaded {} entries", loaded_achievements_.size());
 }
 
+void KernelState::RegisterAchievementUnlockCallback(AchievementUnlockCallback cb) {
+  std::lock_guard<std::mutex> lock(achievement_mutex_);
+  unlock_callbacks_.push_back(std::move(cb));
+}
+
 void KernelState::UnlockAchievement(uint32_t id) {
   bool newly_unlocked = false;
   {
     std::lock_guard<std::mutex> lock(achievement_mutex_);
     newly_unlocked = unlocked_achievement_ids_.insert(id).second;
   }
-  if (newly_unlocked) {
-    REXSYS_INFO("Achievement unlocked: {:08X}", id);
-    SaveUnlockState();
+  if (!newly_unlocked) {
+    return;
+  }
+  REXSYS_INFO("Achievement unlocked: {:08X}", id);
+  SaveUnlockState();
+
+  // Find the matching AchievementInfo (loaded_achievements_ is immutable after boot).
+  const AchievementInfo* info = nullptr;
+  for (const auto& a : loaded_achievements_) {
+    if (a.id == id) { info = &a; break; }
+  }
+  if (info) {
+    std::vector<AchievementUnlockCallback> cbs;
+    {
+      std::lock_guard<std::mutex> lock(achievement_mutex_);
+      cbs = unlock_callbacks_;
+    }
+    for (auto& cb : cbs) cb(*info);
   }
 }
 

@@ -329,6 +329,9 @@ class KernelState {
   bool IsAchievementUnlocked(uint32_t id) const;
   const std::vector<AchievementInfo>& loaded_achievements() const;
 
+  using AchievementUnlockCallback = std::function<void(const AchievementInfo&)>;
+  void RegisterAchievementUnlockCallback(AchievementUnlockCallback cb);
+
  private:
   void SignalAllWaitableObjects();
   void WaitForThreadsToExit(const std::vector<object_ref<XThread>>& threads, uint32_t timeout_ms);
@@ -385,6 +388,7 @@ class KernelState {
   std::unordered_set<uint32_t> unlocked_achievement_ids_;
   mutable std::mutex achievement_mutex_;
   std::filesystem::path unlock_save_path_;
+  std::vector<AchievementUnlockCallback> unlock_callbacks_;
 
   std::atomic<bool> dispatch_thread_running_;
   std::atomic<bool> terminating_title_{false};
