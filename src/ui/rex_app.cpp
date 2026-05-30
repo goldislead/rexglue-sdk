@@ -181,6 +181,11 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     return false;
   }
 
+  game_data_root_ = paths.game_data_root;
+  user_data_root_ = paths.user_data_root;
+  update_data_root_ = paths.update_data_root;
+  cache_root_ = paths.cache_root;
+
   runtime_ = std::make_unique<rex::Runtime>(paths.game_data_root, paths.user_data_root,
                                             paths.update_data_root, paths.cache_root);
   runtime_->set_app_context(&app_context());
