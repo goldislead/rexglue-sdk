@@ -57,8 +57,31 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       assert_true(!buffer_length || buffer_length == 8);
       uint32_t achievement_count = memory::load_and_swap<uint32_t>(buffer + 0);
       uint32_t achievements_ptr = memory::load_and_swap<uint32_t>(buffer + 4);
-      REXKRNL_DEBUG("XGIUserWriteAchievements({:08X}, {:08X})", achievement_count,
-                    achievements_ptr);
+      REXKRNL_DEBUG("XGIUserWriteAchievements({}, {:08X})", achievement_count, achievements_ptr);
+
+      // X_ACHIEVEMENT_DETAILS layout: id (be<u32>) at offset 0, total size 36 bytes.
+      constexpr uint32_t kAchievementDetailsSize = 36;
+      constexpr uint32_t kMaxAchievements = 1000;
+
+      if (achievements_ptr && achievement_count > 0) {
+        if (achievement_count > kMaxAchievements) {
+          REXKRNL_WARN("XGIUserWriteAchievements: unreasonable count {}, ignoring",
+                       achievement_count);
+          return X_E_FAIL;
+        }
+        uint32_t span_end = achievements_ptr + achievement_count * kAchievementDetailsSize - 1;
+        if (!memory_->LookupHeap(achievements_ptr) || !memory_->LookupHeap(span_end)) {
+          REXKRNL_WARN("XGIUserWriteAchievements: buffer {:08X}+{} out of guest memory",
+                       achievements_ptr, achievement_count * kAchievementDetailsSize);
+          return X_E_FAIL;
+        }
+        auto* base = memory_->TranslateVirtual(achievements_ptr);
+        for (uint32_t i = 0; i < achievement_count; ++i) {
+          uint32_t id = memory::load_and_swap<uint32_t>(base + i * kAchievementDetailsSize);
+          kernel_state_->UnlockAchievement(id);
+          REXKRNL_DEBUG("XGIUserWriteAchievements: unlocked id={:08X}", id);
+        }
+      }
       return X_E_SUCCESS;
     }
     case 0x000B0010: {
