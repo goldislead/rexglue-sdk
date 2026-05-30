@@ -343,8 +343,21 @@ bool ReXApp::SetupPresentation() {
             achievements_overlay_.reset();
           } else if (runtime_ && runtime_->kernel_state()) {
             auto* ks = runtime_->kernel_state();
+            // Resolve the icons directory the same way the kernel resolves
+            // achievements.toml: game_data_root/metadata, then parent/metadata.
+            std::filesystem::path icons_dir;
+            for (const std::filesystem::path& cand :
+                 {game_data_root_ / "metadata" / "icons",
+                  game_data_root_.parent_path() / "metadata" / "icons",
+                  game_data_root_ / "icons"}) {
+              std::error_code ec;
+              if (std::filesystem::is_directory(cand, ec)) {
+                icons_dir = cand;
+                break;
+              }
+            }
             achievements_overlay_ = std::make_unique<ui::AchievementsOverlayDialog>(
-                imgui_drawer_.get(),
+                imgui_drawer_.get(), immediate_drawer_.get(), std::move(icons_dir),
                 [ks]() -> const std::vector<rex::system::AchievementInfo>& {
                   return ks->loaded_achievements();
                 },

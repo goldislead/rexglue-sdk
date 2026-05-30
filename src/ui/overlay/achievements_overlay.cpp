@@ -10,14 +10,26 @@
  *              See LICENSE file in the project root for full license text.
  */
 #include <rex/ui/overlay/achievements_overlay.h>
+
+#include <cstdio>
+#include <fstream>
+#include <vector>
+
 #include <imgui.h>
+
+#include <rex/ui/image_decode.h>
+#include <rex/ui/immediate_drawer.h>
 
 namespace rex::ui {
 
 AchievementsOverlayDialog::AchievementsOverlayDialog(ImGuiDrawer* imgui_drawer,
+                                                     ImmediateDrawer* immediate_drawer,
+                                                     std::filesystem::path icons_dir,
                                                      AchievementGetter getter,
                                                      UnlockChecker checker)
     : ImGuiDialog(imgui_drawer),
+      immediate_drawer_(immediate_drawer),
+      icons_dir_(std::move(icons_dir)),
       achievements_getter_(std::move(getter)),
       unlock_checker_(std::move(checker)) {}
 
@@ -32,12 +44,48 @@ constexpr ImVec4 kLockedDesc{0.50f, 0.52f, 0.56f, 1.00f};     // dim grey
 constexpr ImVec4 kBadgeGS{1.00f, 0.82f, 0.30f, 1.00f};        // gamerscore gold
 constexpr ImVec4 kRowUnlockedBg{0.16f, 0.30f, 0.18f, 0.55f};  // green tint
 constexpr ImVec4 kHeaderText{0.60f, 0.85f, 1.00f, 1.00f};     // accent blue
+constexpr float kIconSize = 44.0f;
 }  // namespace
+
+ImmediateTexture* AchievementsOverlayDialog::GetIcon(uint32_t image_id) {
+  auto it = icon_cache_.find(image_id);
+  if (it != icon_cache_.end()) {
+    return it->second.get();  // may be nullptr (cached failure)
+  }
+
+  // First request for this image_id — attempt to load + decode + upload.
+  std::unique_ptr<ImmediateTexture> texture;  // null until successful
+  if (immediate_drawer_ && !icons_dir_.empty()) {
+    std::filesystem::path path = icons_dir_ / (std::to_string(image_id) + ".png");
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+      std::ifstream f(path, std::ios::binary | std::ios::ate);
+      if (f) {
+        std::streamsize len = f.tellg();
+        f.seekg(0);
+        std::vector<uint8_t> bytes(static_cast<size_t>(len));
+        if (len > 0 && f.read(reinterpret_cast<char*>(bytes.data()), len)) {
+          int w = 0, h = 0;
+          std::vector<uint8_t> rgba = DecodeImageRGBA(bytes.data(), bytes.size(), w, h);
+          if (!rgba.empty() && w > 0 && h > 0) {
+            texture = immediate_drawer_->CreateTexture(
+                static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                ImmediateTextureFilter::kLinear, false, rgba.data());
+          }
+        }
+      }
+    }
+  }
+
+  ImmediateTexture* raw = texture.get();
+  icon_cache_.emplace(image_id, std::move(texture));
+  return raw;
+}
 
 void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
   ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 40.0f), ImGuiCond_FirstUseEver,
                           ImVec2(0.5f, 0.0f));
-  ImGui::SetNextWindowSize(ImVec2(620.0f, 540.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(640.0f, 560.0f), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowBgAlpha(0.92f);
 
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
@@ -94,7 +142,19 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
       const float pad = 4.0f;
       ImGui::Dummy(ImVec2(0.0f, pad * 0.5f));
 
-      // Title line: state marker + gamerscore badge + label.
+      // Icon on the left. Locked icons are dimmed so the state reads clearly.
+      ImmediateTexture* icon = GetIcon(a.image_id);
+      if (icon) {
+        ImVec4 tint = is_unlocked ? ImVec4(1, 1, 1, 1) : ImVec4(0.45f, 0.45f, 0.45f, 0.8f);
+        ImGui::ImageWithBg(reinterpret_cast<ImTextureID>(icon), ImVec2(kIconSize, kIconSize),
+                           ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint);
+      } else {
+        ImGui::Dummy(ImVec2(kIconSize, kIconSize));
+      }
+      ImGui::SameLine();
+
+      // Text block to the right of the icon.
+      ImGui::BeginGroup();
       const char* marker = is_unlocked ? "[*]" : "[ ]";
       ImGui::TextColored(is_unlocked ? kUnlockedTitle : kLockedTitle, "%s", marker);
       ImGui::SameLine();
@@ -102,12 +162,10 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
       ImGui::SameLine();
       ImGui::TextColored(is_unlocked ? kUnlockedTitle : kLockedTitle, "%s", a.label.c_str());
 
-      // Description line, indented under the label.
-      ImGui::Indent(28.0f);
       ImGui::PushStyleColor(ImGuiCol_Text, is_unlocked ? kUnlockedDesc : kLockedDesc);
       ImGui::TextWrapped("%s", desc.c_str());
       ImGui::PopStyleColor();
-      ImGui::Unindent(28.0f);
+      ImGui::EndGroup();
 
       ImGui::Dummy(ImVec2(0.0f, pad * 0.5f));
       const float row_end_y = ImGui::GetCursorScreenPos().y;
