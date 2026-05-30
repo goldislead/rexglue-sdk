@@ -19,6 +19,7 @@
 #include <rex/filesystem.h>
 #include <rex/logging/sink.h>
 #include <rex/logging.h>
+#include <rex/ui/overlay/achievement_toast.h>
 #include <rex/ui/overlay/achievements_overlay.h>
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
@@ -351,6 +352,10 @@ bool ReXApp::SetupPresentation() {
           }
         });
 
+        // Achievement toast — created once, invisible until an unlock fires.
+        achievements_toast_ = std::make_unique<ui::AchievementToastDialog>(imgui_drawer_.get());
+        imgui_drawer_->AddDialog(achievements_toast_.get());
+
         OnCreateDialogs(imgui_drawer_.get());
       }
     }
@@ -363,6 +368,17 @@ bool ReXApp::SetupPresentation() {
 void ReXApp::LaunchModule() {
   app_context().CallInUIThreadDeferred([this]() {
     OnPreLaunchModule();
+
+    // Register the achievement toast callback now that the runtime and
+    // KernelState are guaranteed to exist. Done here (not OnCreateDialogs)
+    // because KernelState is null during SetupPresentation.
+    if (achievements_toast_ && runtime_ && runtime_->kernel_state()) {
+      auto* toast = achievements_toast_.get();
+      runtime_->kernel_state()->RegisterAchievementUnlockCallback(
+          [toast](const rex::system::AchievementInfo& info) {
+            toast->Push(info.label, info.gamerscore);
+          });
+    }
 
     auto main_thread = runtime_->PrepareModuleLaunch();
     if (!main_thread) {
@@ -438,6 +454,7 @@ void ReXApp::OnDestroy() {
   rex::ui::UnregisterBind("bind_achievements");
 
   // ImGui cleanup (reverse of setup)
+  achievements_toast_.reset();
   achievements_overlay_.reset();
   settings_overlay_.reset();
   console_overlay_.reset();
