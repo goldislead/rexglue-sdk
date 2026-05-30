@@ -10,9 +10,11 @@
  */
 
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 #include <fmt/format.h>
+#include <toml++/toml.hpp>
 
 #include <rex/assert.h>
 #include <rex/logging.h>
@@ -249,6 +251,80 @@ util::XdbfGameData KernelState::module_xdbf(object_ref<UserModule> exec_module) 
     return db;
   }
   return util::XdbfGameData(nullptr, resource_size);
+}
+
+void KernelState::SetLoadedAchievements(std::vector<AchievementInfo> achievements) {
+  loaded_achievements_ = std::move(achievements);
+  REXSYS_INFO("Achievement store: loaded {} entries", loaded_achievements_.size());
+}
+
+void KernelState::UnlockAchievement(uint32_t id) {
+  unlocked_achievement_ids_.insert(id);
+}
+
+bool KernelState::IsAchievementUnlocked(uint32_t id) const {
+  return unlocked_achievement_ids_.count(id) > 0;
+}
+
+const std::vector<AchievementInfo>& KernelState::loaded_achievements() const {
+  return loaded_achievements_;
+}
+
+void KernelState::LoadAchievementsData() {
+  std::vector<AchievementInfo> achievements;
+
+  const auto& root = emulator_->game_data_root();
+  std::filesystem::path toml_path = root / "metadata" / "achievements.toml";
+  if (!std::filesystem::exists(toml_path)) {
+    toml_path = root / "achievements.toml";
+  }
+
+  if (std::filesystem::exists(toml_path)) {
+    try {
+      auto tbl = toml::parse_file(toml_path.string());
+      if (auto* arr = tbl["achievements"].as_array()) {
+        for (const auto& node : *arr) {
+          if (const auto* entry = node.as_table()) {
+            AchievementInfo info;
+            info.id = static_cast<uint32_t>((*entry)["id"].value_or<int64_t>(0));
+            info.label = (*entry)["label"].value_or<std::string>("");
+            info.description = (*entry)["description"].value_or<std::string>("");
+            info.unachieved_description =
+                (*entry)["unachieved_description"].value_or<std::string>("");
+            info.image_id = static_cast<uint32_t>((*entry)["image_id"].value_or<int64_t>(0));
+            info.gamerscore = static_cast<uint32_t>((*entry)["gamerscore"].value_or<int64_t>(0));
+            info.flags = static_cast<uint32_t>((*entry)["flags"].value_or<int64_t>(0));
+            achievements.push_back(std::move(info));
+          }
+        }
+      }
+      REXSYS_INFO("Loaded achievements.toml: {} entries from {}", achievements.size(),
+                  toml_path.string());
+    } catch (const toml::parse_error& e) {
+      REXSYS_WARN("Failed to parse {}: {}", toml_path.string(), e.what());
+      achievements.clear();
+    }
+  }
+
+  if (achievements.empty()) {
+    const util::XdbfGameData db = title_xdbf();
+    if (db.is_valid()) {
+      const XLanguage language = db.GetExistingLanguage(db.default_language());
+      for (const auto& entry : db.GetAchievements()) {
+        AchievementInfo info;
+        info.id = entry.id;
+        info.label = db.GetStringTableEntry(language, entry.label_id);
+        info.description = db.GetStringTableEntry(language, entry.description_id);
+        info.unachieved_description = db.GetStringTableEntry(language, entry.unachieved_id);
+        info.image_id = entry.image_id;
+        info.gamerscore = entry.gamerscore;
+        info.flags = entry.flags;
+        achievements.push_back(std::move(info));
+      }
+    }
+  }
+
+  SetLoadedAchievements(std::move(achievements));
 }
 
 uint32_t KernelState::process_type() const {
@@ -622,6 +698,8 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
       REX_FATAL("Failed to create kernel dispatch thread (status {:#x})", create_status);
     }
   }
+
+  LoadAchievementsData();
 }
 
 void KernelState::LoadKernelModule(object_ref<KernelModule> kernel_module) {

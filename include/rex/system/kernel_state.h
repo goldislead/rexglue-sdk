@@ -25,6 +25,7 @@
 
 #include <rex/filesystem/vfs.h>
 #include <rex/logging.h>
+#include <rex/system/achievement_store.h>
 #include <rex/system/thread_state.h>
 #include <rex/thread/fiber.h>
 #include <rex/system/util/native_list.h>
@@ -322,6 +323,11 @@ class KernelState {
   bool Save(stream::ByteStream* stream);
   bool Restore(stream::ByteStream* stream);
 
+  void SetLoadedAchievements(std::vector<AchievementInfo> achievements);
+  void UnlockAchievement(uint32_t id);
+  bool IsAchievementUnlocked(uint32_t id) const;
+  const std::vector<AchievementInfo>& loaded_achievements() const;
+
  private:
   void SignalAllWaitableObjects();
   void WaitForThreadsToExit(const std::vector<object_ref<XThread>>& threads, uint32_t timeout_ms);
@@ -330,6 +336,7 @@ class KernelState {
                          uint8_t unk_1A);
   void SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uint32_t tls_data_size,
                          uint32_t tls_raw_data_address);
+  void LoadAchievementsData();
 
   Runtime* emulator_;
   memory::Memory* memory_;
@@ -370,6 +377,9 @@ class KernelState {
   std::vector<rex::platform::DynamicLibrary> deferred_unload_libraries_;
 
   uint32_t kernel_guest_globals_ = 0;
+
+  std::vector<AchievementInfo> loaded_achievements_;
+  std::unordered_set<uint32_t> unlocked_achievement_ids_;
 
   std::atomic<bool> dispatch_thread_running_;
   std::atomic<bool> terminating_title_{false};
