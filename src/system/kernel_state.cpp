@@ -355,21 +355,38 @@ void KernelState::LoadUnlockState() {
   }
   try {
     auto tbl = toml::parse_file(unlock_save_path_.string());
-    const auto* unlocked_tbl = tbl["unlocked"].as_table();
-    if (!unlocked_tbl) {
-      return;
-    }
     std::lock_guard<std::mutex> lock(achievement_mutex_);
-    for (const auto& [key, val] : *unlocked_tbl) {
-      uint32_t id = static_cast<uint32_t>(std::stoul(std::string(key.str())));
-      uint64_t filetime = 0;
-      if (const auto* entry = val.as_table()) {
-        filetime = static_cast<uint64_t>((*entry)["filetime"].value_or<int64_t>(0));
+
+    // New format: [unlocked.<id>] filetime = <value>
+    if (const auto* unlocked_tbl = tbl["unlocked"].as_table()) {
+      for (const auto& [key, val] : *unlocked_tbl) {
+        uint32_t id = static_cast<uint32_t>(std::stoul(std::string(key.str())));
+        uint64_t filetime = 0;
+        if (const auto* entry = val.as_table()) {
+          filetime = static_cast<uint64_t>((*entry)["filetime"].value_or<int64_t>(0));
+        }
+        // Assign a real timestamp if the saved value is 0 (shouldn't happen, be safe).
+        if (filetime == 0) filetime = CurrentFileTime();
+        unlocked_achievements_.emplace(id, filetime);
       }
-      unlocked_achievements_.emplace(id, filetime);
     }
-    REXSYS_INFO("Loaded {} persisted unlocks from {}",
-                unlocked_achievements_.size(), unlock_save_path_.string());
+    // Legacy format: unlocked = [id, id, ...] — migrate it on load.
+    else if (const auto* arr = tbl["unlocked"].as_array()) {
+      REXSYS_INFO("Migrating legacy achievement save format: {}", unlock_save_path_.string());
+      uint64_t now = CurrentFileTime();
+      for (const auto& node : *arr) {
+        if (auto v = node.value<int64_t>()) {
+          uint32_t id = static_cast<uint32_t>(*v);
+          // Skip ID 0 — not a valid achievement, was a parsing artefact.
+          if (id != 0) unlocked_achievements_.emplace(id, now);
+        }
+      }
+    }
+
+    if (!unlocked_achievements_.empty()) {
+      REXSYS_INFO("Loaded {} persisted unlocks from {}",
+                  unlocked_achievements_.size(), unlock_save_path_.string());
+    }
   } catch (const toml::parse_error& e) {
     REXSYS_WARN("Failed to parse unlock save {}: {}", unlock_save_path_.string(), e.what());
   }
