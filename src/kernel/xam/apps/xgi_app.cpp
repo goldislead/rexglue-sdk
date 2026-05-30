@@ -64,8 +64,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t achievement_count = raw0;
       uint32_t achievements_ptr  = raw4;
 
-      // X_ACHIEVEMENT_DETAILS layout: id (be<u32>) at offset 0, total size 36 bytes.
-      constexpr uint32_t kAchievementDetailsSize = 36;
+      // Empirically confirmed from log: each entry is {u32 padding/user_index, u32 id, ...}.
+      // The achievement ID sits at offset 4, not 0. Stride 8 covers the observed fields.
+      constexpr uint32_t kEntryIdOffset = 4;
+      constexpr uint32_t kEntryStride   = 8;
       constexpr uint32_t kMaxAchievements = 1000;
 
       if (achievements_ptr && achievement_count > 0) {
@@ -74,21 +76,16 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                        achievement_count);
           return X_E_FAIL;
         }
-        uint32_t span_end = achievements_ptr + achievement_count * kAchievementDetailsSize - 1;
+        uint32_t span_end = achievements_ptr + achievement_count * kEntryStride - 1;
         if (!memory_->LookupHeap(achievements_ptr) || !memory_->LookupHeap(span_end)) {
-          REXKRNL_WARN("XGIUserWriteAchievements: ptr {:08X} span {} OOB",
-                       achievements_ptr, achievement_count * kAchievementDetailsSize);
+          REXKRNL_WARN("XGIUserWriteAchievements: ptr {:08X} OOB", achievements_ptr);
           return X_E_FAIL;
         }
         auto* base = memory_->TranslateVirtual(achievements_ptr);
-        // Log the first 8 bytes at the ptr so we can verify the struct layout.
-        uint32_t peek0 = memory::load_and_swap<uint32_t>(base + 0);
-        uint32_t peek4 = memory::load_and_swap<uint32_t>(base + 4);
-        REXKRNL_INFO("XGIUserWriteAchievements: details[0] id_field={:08X} next={:08X}",
-                     peek0, peek4);
         for (uint32_t i = 0; i < achievement_count; ++i) {
-          uint32_t id = memory::load_and_swap<uint32_t>(base + i * kAchievementDetailsSize);
-          REXKRNL_INFO("XGIUserWriteAchievements: unlocking id={}", id);
+          uint32_t id = memory::load_and_swap<uint32_t>(
+              base + i * kEntryStride + kEntryIdOffset);
+          REXKRNL_INFO("XGIUserWriteAchievements: id={} ({})", id, i);
           kernel_state_->UnlockAchievement(id);
         }
       } else {
