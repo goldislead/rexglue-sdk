@@ -26,7 +26,7 @@
 
 #include <rex/filesystem/vfs.h>
 #include <rex/logging.h>
-#include <rex/system/achievement_store.h>
+#include <rex/system/achievement_manager.h>
 #include <rex/system/thread_state.h>
 #include <rex/thread/fiber.h>
 #include <rex/system/util/native_list.h>
@@ -330,9 +330,11 @@ class KernelState {
   // Returns the unlock FILETIME (100-ns intervals since 1601-01-01), or 0 if locked.
   uint64_t GetAchievementUnlockTime(uint32_t id) const;
   const std::vector<AchievementInfo>& loaded_achievements() const;
+  AchievementManager& achievements() { return achievement_manager_; }
+  const AchievementManager& achievements() const { return achievement_manager_; }
 
   using AchievementUnlockCallback = std::function<void(const AchievementInfo&)>;
-  void RegisterAchievementUnlockCallback(AchievementUnlockCallback cb);
+  AchievementListenerHandle RegisterAchievementUnlockCallback(AchievementUnlockCallback cb);
 
  private:
   void SignalAllWaitableObjects();
@@ -343,8 +345,6 @@ class KernelState {
   void SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uint32_t tls_data_size,
                          uint32_t tls_raw_data_address);
   void LoadAchievementsData();
-  void SaveUnlockState() const;
-  void LoadUnlockState();
 
   Runtime* emulator_;
   memory::Memory* memory_;
@@ -386,12 +386,7 @@ class KernelState {
 
   uint32_t kernel_guest_globals_ = 0;
 
-  std::vector<AchievementInfo> loaded_achievements_;
-  // Maps achievement ID → FILETIME of unlock (100-ns intervals since 1601-01-01).
-  std::unordered_map<uint32_t, uint64_t> unlocked_achievements_;
-  mutable std::mutex achievement_mutex_;
-  std::filesystem::path unlock_save_path_;
-  std::vector<AchievementUnlockCallback> unlock_callbacks_;
+  AchievementManager achievement_manager_;
 
   std::atomic<bool> dispatch_thread_running_;
   std::atomic<bool> terminating_title_{false};

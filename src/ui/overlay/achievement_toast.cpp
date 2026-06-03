@@ -14,13 +14,14 @@
 
 namespace rex::ui {
 
-AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
+AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer)
+    : AchievementNotificationDialog(drawer) {}
 
 AchievementToastDialog::~AchievementToastDialog() {}
 
-void AchievementToastDialog::Push(std::string label, uint32_t gamerscore) {
+void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
   std::lock_guard<std::mutex> lock(mutex_);
-  queue_.push_back({std::move(label), gamerscore, std::chrono::steady_clock::now()});
+  queue_.push_back({event, std::chrono::steady_clock::now()});
 }
 
 void AchievementToastDialog::OnDraw(ImGuiIO& io) {
@@ -30,10 +31,13 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
     std::lock_guard<std::mutex> lock(mutex_);
     while (!queue_.empty()) {
       float age = std::chrono::duration<float>(now - queue_.front().arrived).count();
-      if (age >= kDisplaySeconds) queue_.pop_front();
-      else break;
+      if (age >= kDisplaySeconds)
+        queue_.pop_front();
+      else
+        break;
     }
-    if (queue_.empty()) return;
+    if (queue_.empty())
+      return;
   }
 
   PendingToast toast;
@@ -45,8 +49,10 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
   }
 
   float alpha = 1.0f;
-  if (age < 0.3f) alpha = age / 0.3f;
-  else if (age > kDisplaySeconds - 0.5f) alpha = (kDisplaySeconds - age) / 0.5f;
+  if (age < 0.3f)
+    alpha = age / 0.3f;
+  else if (age > kDisplaySeconds - 0.5f)
+    alpha = (kDisplaySeconds - age) / 0.5f;
   alpha = std::max(0.0f, std::min(1.0f, alpha));
 
   const float pad = 16.0f;
@@ -65,9 +71,9 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, alpha));
     ImGui::TextUnformatted("Achievement Unlocked");
     ImGui::PopStyleColor();
-    ImGui::TextUnformatted(toast.label.c_str());
+    ImGui::TextUnformatted(toast.event.achievement.label.c_str());
     ImGui::SameLine();
-    ImGui::TextDisabled(" (%dG)", static_cast<int>(toast.gamerscore));
+    ImGui::TextDisabled(" (%dG)", static_cast<int>(toast.event.achievement.gamerscore));
   }
   ImGui::End();
   ImGui::PopStyleColor();

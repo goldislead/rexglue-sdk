@@ -439,6 +439,7 @@ Result<void> InitAchievements(const InitAchievementsOptions& opts, const CliCont
                     escape_toml(db.GetStringTableEntry(lang, entry.unachieved_id)));
     content += fmt::format("gamerscore            = {}\n", uint32_t(entry.gamerscore));
     content += fmt::format("image_id              = {}\n", uint32_t(entry.image_id));
+    content += fmt::format("icon_path             = \"icons/{}.png\"\n", uint32_t(entry.image_id));
     content += fmt::format("flags                 = {}\n\n", uint32_t(entry.flags));
   }
 

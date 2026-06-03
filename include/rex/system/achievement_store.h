@@ -19,6 +19,7 @@ struct AchievementInfo {
   std::string label;
   std::string description;
   std::string unachieved_description;
+  std::string icon_path;
   uint32_t image_id = 0;
   uint32_t gamerscore = 0;
   uint32_t flags = 0;

@@ -48,6 +48,11 @@ std::unordered_map<std::string, size_t>& GetRegistryIndex() {
   return index;
 }
 
+std::unordered_map<std::string, std::string>& GetDeferredConfigStorage() {
+  static std::unordered_map<std::string, std::string> deferred;
+  return deferred;
+}
+
 // Convert flag name to environment variable: gpu_vsync -> REX_GPU_VSYNC
 std::string FlagNameToEnvVar(std::string_view name) {
   std::string result = "REX_";
@@ -80,9 +85,11 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
       }
 
       if (SetFlagByName(full_key, value_str)) {
+        GetDeferredConfigStorage().erase(full_key);
         REXLOG_DEBUG("Config: {} = {}", full_key, value_str);
       } else {
-        REXLOG_WARN("Config: unknown cvar '{}'", full_key);
+        GetDeferredConfigStorage()[full_key] = value_str;
+        REXLOG_DEBUG("Config: deferring unknown cvar '{}'", full_key);
       }
     }
   }
@@ -186,6 +193,19 @@ std::optional<size_t> RegisterFlag(FlagEntry entry) {
   size_t pos = storage.size();
   index[entry.name] = pos;
   storage.push_back(std::move(entry));
+
+  auto& deferred = GetDeferredConfigStorage();
+  auto deferred_it = deferred.find(storage[pos].name);
+  if (deferred_it != deferred.end()) {
+    std::string name = deferred_it->first;
+    std::string value = deferred_it->second;
+    if (SetFlagByName(name, value)) {
+      deferred.erase(deferred_it);
+      REXLOG_DEBUG("Config: applied deferred cvar {} = {}", name, value);
+    } else {
+      REXLOG_WARN("Config: failed to apply deferred cvar '{}'", name);
+    }
+  }
   return pos;
 }
 
@@ -529,6 +549,10 @@ void ApplyEnvironment() {
 void FinalizeInit() {
   std::lock_guard lock(g_mutex);
   g_finalized = true;
+  for (const auto& [name, value] : GetDeferredConfigStorage()) {
+    (void)value;
+    REXLOG_WARN("Config: unknown cvar '{}'", name);
+  }
   REXLOG_DEBUG("cvar: initialization finalized");
 }
 
@@ -570,6 +594,7 @@ ScopedLifecycleOverride::~ScopedLifecycleOverride() {
 void ResetAllForTesting() {
   ResetAllToDefaults();
   ClearPendingRestartFlags();
+  GetDeferredConfigStorage().clear();
   g_finalized = false;
 }
 

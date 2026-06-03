@@ -17,6 +17,7 @@
 
 #include <imgui.h>
 
+#include <rex/runtime.h>
 #include <rex/ui/image_decode.h>
 #include <rex/ui/immediate_drawer.h>
 
@@ -24,14 +25,12 @@ namespace rex::ui {
 
 AchievementsOverlayDialog::AchievementsOverlayDialog(ImGuiDrawer* imgui_drawer,
                                                      ImmediateDrawer* immediate_drawer,
-                                                     std::filesystem::path icons_dir,
-                                                     AchievementGetter getter,
-                                                     UnlockChecker checker)
+                                                     rex::Runtime* runtime,
+                                                     rex::system::AchievementManager* achievements)
     : ImGuiDialog(imgui_drawer),
       immediate_drawer_(immediate_drawer),
-      icons_dir_(std::move(icons_dir)),
-      achievements_getter_(std::move(getter)),
-      unlock_checker_(std::move(checker)) {}
+      runtime_(runtime),
+      achievements_(achievements) {}
 
 AchievementsOverlayDialog::~AchievementsOverlayDialog() {}
 
@@ -47,19 +46,25 @@ constexpr ImVec4 kHeaderText{0.60f, 0.85f, 1.00f, 1.00f};     // accent blue
 constexpr float kIconSize = 44.0f;
 }  // namespace
 
-ImmediateTexture* AchievementsOverlayDialog::GetIcon(uint32_t image_id) {
-  auto it = icon_cache_.find(image_id);
+ImmediateTexture* AchievementsOverlayDialog::GetIcon(
+    const rex::system::AchievementInfo& achievement) {
+  std::filesystem::path relative_path =
+      achievement.icon_path.empty()
+          ? std::filesystem::path("icons") / (std::to_string(achievement.image_id) + ".png")
+          : std::filesystem::path(achievement.icon_path);
+  std::string cache_key = relative_path.generic_string();
+  auto it = icon_cache_.find(cache_key);
   if (it != icon_cache_.end()) {
     return it->second.get();  // may be nullptr (cached failure)
   }
 
-  // First request for this image_id — attempt to load + decode + upload.
+  // First request for this metadata path: attempt to load, decode, and upload.
   std::unique_ptr<ImmediateTexture> texture;  // null until successful
-  if (immediate_drawer_ && !icons_dir_.empty()) {
-    std::filesystem::path path = icons_dir_ / (std::to_string(image_id) + ".png");
+  if (immediate_drawer_ && runtime_) {
+    auto path = runtime_->FindMetadataPath(relative_path);
     std::error_code ec;
-    if (std::filesystem::exists(path, ec)) {
-      std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (path && std::filesystem::exists(*path, ec)) {
+      std::ifstream f(*path, std::ios::binary | std::ios::ate);
       if (f) {
         std::streamsize len = f.tellg();
         f.seekg(0);
@@ -69,8 +74,8 @@ ImmediateTexture* AchievementsOverlayDialog::GetIcon(uint32_t image_id) {
           std::vector<uint8_t> rgba = DecodeImageRGBA(bytes.data(), bytes.size(), w, h);
           if (!rgba.empty() && w > 0 && h > 0) {
             texture = immediate_drawer_->CreateTexture(
-                static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-                ImmediateTextureFilter::kLinear, false, rgba.data());
+                static_cast<uint32_t>(w), static_cast<uint32_t>(h), ImmediateTextureFilter::kLinear,
+                false, rgba.data());
           }
         }
       }
@@ -78,7 +83,7 @@ ImmediateTexture* AchievementsOverlayDialog::GetIcon(uint32_t image_id) {
   }
 
   ImmediateTexture* raw = texture.get();
-  icon_cache_.emplace(image_id, std::move(texture));
+  icon_cache_.emplace(std::move(cache_key), std::move(texture));
   return raw;
 }
 
@@ -92,14 +97,14 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
 
   if (ImGui::Begin("Achievements##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
-    const auto& achievements = achievements_getter_();
+    const auto achievements = achievements_->ListAchievements();
 
     int unlocked_count = 0;
     int total_gs = 0;
     int earned_gs = 0;
     for (const auto& a : achievements) {
       total_gs += static_cast<int>(a.gamerscore);
-      if (unlock_checker_(a.id)) {
+      if (achievements_->IsUnlocked(a.id)) {
         ++unlocked_count;
         earned_gs += static_cast<int>(a.gamerscore);
       }
@@ -118,7 +123,7 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
     ImGui::ProgressBar(frac, ImVec2(-1.0f, 6.0f), "");
     ImGui::PopStyleColor();
 
-    ImGui::TextDisabled("Session only - resets on restart");
+    ImGui::TextDisabled("Unlock progress is saved automatically");
     ImGui::Separator();
     ImGui::Spacing();
 
@@ -127,9 +132,8 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
     for (const auto& a : achievements) {
-      const bool is_unlocked = unlock_checker_(a.id);
-      const std::string& desc =
-          is_unlocked ? a.description : a.unachieved_description;
+      const bool is_unlocked = achievements_->IsUnlocked(a.id);
+      const std::string& desc = is_unlocked ? a.description : a.unachieved_description;
 
       ImGui::PushID(static_cast<int>(a.id));
 
@@ -143,7 +147,7 @@ void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
       ImGui::Dummy(ImVec2(0.0f, pad * 0.5f));
 
       // Icon on the left. Locked icons are dimmed so the state reads clearly.
-      ImmediateTexture* icon = GetIcon(a.image_id);
+      ImmediateTexture* icon = GetIcon(a);
       if (icon) {
         ImVec4 tint = is_unlocked ? ImVec4(1, 1, 1, 1) : ImVec4(0.45f, 0.45f, 0.45f, 0.8f);
         ImGui::ImageWithBg(reinterpret_cast<ImTextureID>(icon), ImVec2(kIconSize, kIconSize),

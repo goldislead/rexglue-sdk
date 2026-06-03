@@ -15,19 +15,17 @@
 #include <chrono>
 #include <deque>
 #include <mutex>
-#include <string>
-
-#include <rex/ui/imgui_dialog.h>
+#include <rex/ui/overlay/achievement_notification.h>
 
 namespace rex::ui {
 
-class AchievementToastDialog : public ImGuiDialog {
+class AchievementToastDialog : public AchievementNotificationDialog {
  public:
   explicit AchievementToastDialog(ImGuiDrawer* drawer);
-  ~AchievementToastDialog();
+  ~AchievementToastDialog() override;
 
   // Thread-safe: safe to call from any thread, including guest threads.
-  void Push(std::string label, uint32_t gamerscore);
+  void Push(const rex::system::AchievementEvent& event) override;
 
  protected:
   void OnDraw(ImGuiIO& io) override;
@@ -36,8 +34,7 @@ class AchievementToastDialog : public ImGuiDialog {
   static constexpr float kDisplaySeconds = 4.5f;
 
   struct PendingToast {
-    std::string label;
-    uint32_t gamerscore;
+    rex::system::AchievementEvent event;
     std::chrono::steady_clock::time_point arrived;
   };
 
