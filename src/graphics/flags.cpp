@@ -24,6 +24,13 @@ REXCVAR_DEFINE_BOOL(depth_transfer_not_equal_test, true, "GPU",
 REXCVAR_DEFINE_BOOL(gamma_render_target_as_unorm16, true, "GPU",
                     "Use R16G16B16A16_UNORM for gamma render targets (more accurate than sRGB)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(
+    host_render_target_round_2_10_10_10, true, "GPU",
+    "On the host render target path, round pixel shader output for k_2_10_10_10 "
+    "family render targets to the guest EDRAM storage precision (7e3 float for "
+    "the _FLOAT formats, 10:10:10:2 unorm otherwise). Fixes blown-out / banded "
+    "HDR tonemapping in games whose 7e3 targets are emulated as R16G16B16A16_FLOAT.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
 REXCVAR_DEFINE_BOOL(use_fuzzy_alpha_epsilon, false, "GPU",
                     "Use approximate compare for alpha test values to prevent "

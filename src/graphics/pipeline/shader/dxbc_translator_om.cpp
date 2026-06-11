@@ -1537,6 +1537,11 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToRTVs() {
   }
 
   uint32_t gamma_temp = PushSystemTemp();
+  // Temps for rounding the k_2_10_10_10 family output to the guest EDRAM storage
+  // precision (see the rounding code near the end of the loop body).
+  uint32_t round_format_temp = PushSystemTemp();
+  uint32_t round_bits_temp = PushSystemTemp();
+  uint32_t round_scratch_temp = PushSystemTemp();
   for (uint32_t i = 0; i < 4; ++i) {
     if (!(shader_writes_color_targets & (1 << i))) {
       continue;
@@ -1563,11 +1568,88 @@ void DxbcShaderTranslator::CompletePixelShader_WriteToRTVs() {
       }
       a_.OpEndIf();
     }
+    // Round the pixel shader output for the k_2_10_10_10 family render targets
+    // to the guest EDRAM storage precision. These targets are emulated with
+    // higher-precision host formats (R16G16B16A16_FLOAT for the 7e3 _FLOAT
+    // formats), so without rounding here the values written - used both as
+    // fixed-function blend sources and read back by the game for HDR
+    // tonemapping - retain out-of-range / higher-precision data, breaking the
+    // tonemapping curves the game relies on. The format is provided in
+    // edram_rt_format_flags only for render targets where this rounding is
+    // enabled; otherwise it matches no case below and the color is unchanged.
+    {
+      dxbc::Src rt_format_flags_src(LoadSystemConstant(
+          SystemConstants::Index::kEdramRTFormatFlags,
+          offsetof(SystemConstants, edram_rt_format_flags) + sizeof(uint32_t) * i,
+          dxbc::Src::kXXXX));
+      // round_format_temp.x = base color format.
+      a_.OpUBFE(dxbc::Dest::R(round_format_temp, 0b0001),
+                dxbc::Src::LU(xenos::kColorRenderTargetFormatBits), dxbc::Src::LU(0),
+                rt_format_flags_src);
+      // round_format_temp.y = whether the format is a 7e3 float format.
+      a_.OpIEq(dxbc::Dest::R(round_format_temp, 0b0010),
+               dxbc::Src::R(round_format_temp, dxbc::Src::kXXXX),
+               dxbc::Src::LU(uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT)));
+      a_.OpIEq(dxbc::Dest::R(round_format_temp, 0b0100),
+               dxbc::Src::R(round_format_temp, dxbc::Src::kXXXX),
+               dxbc::Src::LU(uint32_t(
+                   xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16)));
+      a_.OpOr(dxbc::Dest::R(round_format_temp, 0b0010),
+              dxbc::Src::R(round_format_temp, dxbc::Src::kYYYY),
+              dxbc::Src::R(round_format_temp, dxbc::Src::kZZZZ));
+      // round_format_temp.z = whether the format is a 10:10:10:2 unorm format.
+      a_.OpIEq(dxbc::Dest::R(round_format_temp, 0b0100),
+               dxbc::Src::R(round_format_temp, dxbc::Src::kXXXX),
+               dxbc::Src::LU(uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10)));
+      a_.OpIEq(dxbc::Dest::R(round_format_temp, 0b1000),
+               dxbc::Src::R(round_format_temp, dxbc::Src::kXXXX),
+               dxbc::Src::LU(
+                   uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10)));
+      a_.OpOr(dxbc::Dest::R(round_format_temp, 0b0100),
+              dxbc::Src::R(round_format_temp, dxbc::Src::kZZZZ),
+              dxbc::Src::R(round_format_temp, dxbc::Src::kWWWW));
+      // round_format_temp.z = whether the format is in the k_2_10_10_10 family.
+      a_.OpOr(dxbc::Dest::R(round_format_temp, 0b0100),
+              dxbc::Src::R(round_format_temp, dxbc::Src::kYYYY),
+              dxbc::Src::R(round_format_temp, dxbc::Src::kZZZZ));
+      a_.OpIf(true, dxbc::Src::R(round_format_temp, dxbc::Src::kZZZZ));
+      for (uint32_t j = 0; j < 3; ++j) {
+        // round_bits_temp.y = 10-bit unorm rounding: round(saturate(c)*1023)/1023.
+        a_.OpMov(dxbc::Dest::R(round_bits_temp, 0b0010),
+                 dxbc::Src::R(system_temp_color).Select(j), true);
+        a_.OpMul(dxbc::Dest::R(round_bits_temp, 0b0010),
+                 dxbc::Src::R(round_bits_temp, dxbc::Src::kYYYY), dxbc::Src::LF(1023.0f));
+        a_.OpRoundNE(dxbc::Dest::R(round_bits_temp, 0b0010),
+                     dxbc::Src::R(round_bits_temp, dxbc::Src::kYYYY));
+        a_.OpMul(dxbc::Dest::R(round_bits_temp, 0b0010),
+                 dxbc::Src::R(round_bits_temp, dxbc::Src::kYYYY), dxbc::Src::LF(1.0f / 1023.0f));
+        // round_bits_temp.x = the 7e3 bits of the component.
+        UnclampedFloat32To7e3(a_, round_bits_temp, 0, system_temp_color, j, round_scratch_temp, 0);
+        // round_format_temp.w = the component converted back from 7e3.
+        Float7e3To32(a_, dxbc::Dest::R(round_format_temp, 0b1000), round_bits_temp, 0, 0,
+                     round_scratch_temp, 0, round_scratch_temp, 1);
+        // Use the 7e3 value for float formats, the unorm value otherwise.
+        a_.OpMovC(dxbc::Dest::R(system_temp_color, 1 << j),
+                  dxbc::Src::R(round_format_temp, dxbc::Src::kYYYY),
+                  dxbc::Src::R(round_format_temp, dxbc::Src::kWWWW),
+                  dxbc::Src::R(round_bits_temp, dxbc::Src::kYYYY));
+      }
+      // Alpha is 2-bit unorm in all four formats: round(saturate(a)*3)/3.
+      a_.OpMov(dxbc::Dest::R(system_temp_color, 0b1000),
+               dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW), true);
+      a_.OpMul(dxbc::Dest::R(system_temp_color, 0b1000),
+               dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW), dxbc::Src::LF(3.0f));
+      a_.OpRoundNE(dxbc::Dest::R(system_temp_color, 0b1000),
+                   dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW));
+      a_.OpMul(dxbc::Dest::R(system_temp_color, 0b1000),
+               dxbc::Src::R(system_temp_color, dxbc::Src::kWWWW), dxbc::Src::LF(1.0f / 3.0f));
+      a_.OpEndIf();
+    }
     // Copy the color from a readable temp register to an output register.
     a_.OpMov(dxbc::Dest::O(i), dxbc::Src::R(system_temp_color));
   }
-  // Release gamma_temp.
-  PopSystemTemp();
+  // Release the rounding temps and gamma_temp.
+  PopSystemTemp(4);
 }
 
 void DxbcShaderTranslator::CompletePixelShader_DSV_DepthTo24Bit() {

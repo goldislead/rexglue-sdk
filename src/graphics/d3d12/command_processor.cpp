@@ -3948,6 +3948,20 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
         rex::memory::Reinterpret<float>(int32_t(0x3F800000 + (color_exp_bias << 23)));
     dirty |= system_constants_.color_exp_bias[i] != color_exp_bias_scale;
     system_constants_.color_exp_bias[i] = color_exp_bias_scale;
+    if (!edram_rov_used) {
+      // Host render target path. The pixel shader rounds its output for the
+      // k_2_10_10_10 family to the guest EDRAM storage precision so that values
+      // written to the higher-precision host format (e.g. R16G16B16A16_FLOAT for
+      // 7e3) - used both as blend sources and read back for HDR tonemapping -
+      // match the Xbox 360. Provide the guest format here; an out-of-range value
+      // (UINT32_MAX) disables the rounding for the render target.
+      uint32_t host_rt_format_flags =
+          REXCVAR_GET(host_render_target_round_2_10_10_10)
+              ? RenderTargetCache::AddPSIColorFormatFlags(color_info.color_format)
+              : UINT32_MAX;
+      dirty |= system_constants_.edram_rt_format_flags[i] != host_rt_format_flags;
+      system_constants_.edram_rt_format_flags[i] = host_rt_format_flags;
+    }
     if (edram_rov_used) {
       dirty |= system_constants_.edram_rt_keep_mask[i][0] != rt_keep_masks[i][0];
       system_constants_.edram_rt_keep_mask[i][0] = rt_keep_masks[i][0];

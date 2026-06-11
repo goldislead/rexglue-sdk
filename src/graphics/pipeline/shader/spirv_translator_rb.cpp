@@ -1360,6 +1360,93 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
           builder_->getBuildPoint()->addInstruction(std::move(color_rgba_shuffle_op));
         }
 
+        // Round the pixel shader output for the k_2_10_10_10 family render
+        // targets to the guest EDRAM storage precision. These targets are
+        // emulated with higher-precision host formats (R16G16B16A16_FLOAT for
+        // the 7e3 _FLOAT formats), so without rounding here the values written -
+        // used both as fixed-function blend sources and read back by the game
+        // for HDR tonemapping - retain out-of-range / higher-precision data,
+        // breaking the tonemapping curves the game relies on. The format is
+        // provided in edram_rt_format_flags only for render targets where this
+        // rounding is enabled; otherwise it matches no case below and the color
+        // is left unchanged.
+        {
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantEdramRTFormatFlags));
+          id_vector_temp_.push_back(builder_->makeIntConstant(int32_t(color_target_index)));
+          spv::Id rt_format = builder_->createTriOp(
+              spv::OpBitFieldUExtract, type_uint_,
+              builder_->createLoad(
+                  builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
+                                              id_vector_temp_),
+                  spv::NoPrecision),
+              const_uint_0_, builder_->makeUintConstant(xenos::kColorRenderTargetFormatBits));
+          spv::Id format_is_float = builder_->createBinOp(
+              spv::OpLogicalOr, type_bool_,
+              builder_->createBinOp(
+                  spv::OpIEqual, type_bool_, rt_format,
+                  builder_->makeUintConstant(
+                      uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT))),
+              builder_->createBinOp(
+                  spv::OpIEqual, type_bool_, rt_format,
+                  builder_->makeUintConstant(uint32_t(
+                      xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16))));
+          spv::Id format_is_unorm = builder_->createBinOp(
+              spv::OpLogicalOr, type_bool_,
+              builder_->createBinOp(
+                  spv::OpIEqual, type_bool_, rt_format,
+                  builder_->makeUintConstant(
+                      uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10))),
+              builder_->createBinOp(
+                  spv::OpIEqual, type_bool_, rt_format,
+                  builder_->makeUintConstant(
+                      uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10))));
+          spv::Id format_is_2_10_10_10 =
+              builder_->createBinOp(spv::OpLogicalOr, type_bool_, format_is_float, format_is_unorm);
+          SpirvBuilder::IfBuilder if_2_10_10_10(
+              format_is_2_10_10_10, spv::SelectionControlDontFlattenMask, *builder_);
+          spv::Id color_rounded;
+          {
+            // Alpha is 2-bit unorm in all four formats: round(saturate(a) * 3) / 3.
+            spv::Id alpha = builder_->createTriBuiltinCall(
+                type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp,
+                builder_->createCompositeExtract(color, type_float_, 3), const_float_0_,
+                const_float_1_);
+            alpha = builder_->createUnaryBuiltinCall(
+                type_float_, ext_inst_glsl_std_450_, GLSLstd450RoundEven,
+                builder_->createNoContractionBinOp(spv::OpFMul, type_float_, alpha,
+                                                   builder_->makeFloatConstant(3.0f)));
+            alpha = builder_->createNoContractionBinOp(spv::OpFMul, type_float_, alpha,
+                                                       builder_->makeFloatConstant(1.0f / 3.0f));
+            // RGB: 7e3 round-trip for the float formats, 10-bit unorm rounding
+            // (round(saturate(c) * 1023) / 1023) otherwise.
+            id_vector_temp_.clear();
+            for (uint32_t i = 0; i < 3; ++i) {
+              spv::Id component = builder_->createCompositeExtract(color, type_float_, i);
+              spv::Id component_float = Float7e3To32(
+                  *builder_, UnclampedFloat32To7e3(*builder_, component, ext_inst_glsl_std_450_), 0,
+                  false, ext_inst_glsl_std_450_);
+              spv::Id component_unorm = builder_->createTriBuiltinCall(
+                  type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, component, const_float_0_,
+                  const_float_1_);
+              component_unorm = builder_->createUnaryBuiltinCall(
+                  type_float_, ext_inst_glsl_std_450_, GLSLstd450RoundEven,
+                  builder_->createNoContractionBinOp(spv::OpFMul, type_float_, component_unorm,
+                                                     builder_->makeFloatConstant(1023.0f)));
+              component_unorm = builder_->createNoContractionBinOp(
+                  spv::OpFMul, type_float_, component_unorm,
+                  builder_->makeFloatConstant(1.0f / 1023.0f));
+              id_vector_temp_.push_back(builder_->createTriOp(spv::OpSelect, type_float_,
+                                                              format_is_float, component_float,
+                                                              component_unorm));
+            }
+            id_vector_temp_.push_back(alpha);
+            color_rounded = builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
+          }
+          if_2_10_10_10.makeEndIf();
+          color = if_2_10_10_10.createMergePhi(color_rounded, color);
+        }
+
         builder_->createStore(color, color_variable);
       }
     }
