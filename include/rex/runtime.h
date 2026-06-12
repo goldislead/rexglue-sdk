@@ -16,7 +16,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <span>
+#include <string>
 
 #include <rex/cvar.h>
 #include <rex/embedded_metadata.h>
@@ -64,6 +64,9 @@ class ImGuiDrawer;
 /// construction time, which is only available during Setup().
 struct RuntimeConfig {
   std::unique_ptr<system::IGraphicsSystem> graphics;
+  // GPU emulation plugin loaded by ReXApp when `graphics` is empty
+  // (e.g. "xenos"); empty means no GPU emulation.
+  std::string gpu_plugin;
   std::function<std::unique_ptr<system::IAudioSystem>(runtime::FunctionDispatcher*)> audio_factory;
   std::function<std::unique_ptr<system::IInputSystem>(bool tool_mode)> input_factory;
   std::function<void(Runtime*, system::KernelState*)> kernel_init;
@@ -73,7 +76,7 @@ struct RuntimeConfig {
 /// Helper macros for populating RuntimeConfig with concrete backends.
 /// Usage:
 ///   rex::RuntimeConfig config;
-///   config.graphics      = REX_GRAPHICS_BACKEND(rex::graphics::vulkan::VulkanGraphicsSystem);
+///   config.graphics      = REX_GRAPHICS_BACKEND(MyCustomGraphicsSystem);
 ///   config.audio_factory = REX_AUDIO_BACKEND(rex::audio::sdl::SDLAudioSystem);
 #define REX_GRAPHICS_BACKEND(Type) std::make_unique<Type>()
 #define REX_AUDIO_BACKEND(Type)                                                                 \
