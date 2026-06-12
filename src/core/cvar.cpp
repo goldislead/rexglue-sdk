@@ -7,11 +7,14 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
+#include <string_view>
 #include <unordered_map>
 
 #include <CLI/CLI.hpp>
@@ -29,6 +32,10 @@ namespace {
 bool g_finalized = false;
 bool g_lifecycle_override = false;
 std::mutex g_mutex;
+
+// Set once cvar::Init has parsed the command line. Registrations after this
+// point are from runtime-loaded modules and drain pending values.
+std::atomic<bool> g_init_done = false;
 
 // Recursive: FlagRegistrar chain methods re-enter; change callbacks invoked
 // from SetFlagByName must not mutate the registry.
@@ -48,9 +55,17 @@ std::unordered_map<std::string, size_t>& GetRegistryIndex() {
   return index;
 }
 
-std::unordered_map<std::string, std::string>& GetDeferredConfigStorage() {
-  static std::unordered_map<std::string, std::string> deferred;
-  return deferred;
+// Values that arrived from the command line or config file before their cvar
+// was registered. Runtime-loaded modules (GPU plugins, guest DLLs) register
+// cvars long after Init/LoadConfig; RegisterFlag drains this on registration.
+struct PendingValues {
+  std::optional<std::string> cmdline;
+  std::optional<std::string> config;
+};
+
+std::unordered_map<std::string, PendingValues>& GetPendingValuesStorage() {
+  static std::unordered_map<std::string, PendingValues> pending;
+  return pending;
 }
 
 // Convert flag name to environment variable: gpu_vsync -> REX_GPU_VSYNC
@@ -84,12 +99,14 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
         continue;
       }
 
-      if (SetFlagByName(full_key, value_str)) {
-        GetDeferredConfigStorage().erase(full_key);
+      if (GetFlagInfo(full_key) == nullptr) {
+        std::lock_guard lock(GetRegistryMutex());
+        GetPendingValuesStorage()[full_key].config = value_str;
+        REXLOG_DEBUG("Config: '{}' deferred (cvar not yet registered)", full_key);
+      } else if (SetFlagByName(full_key, value_str)) {
         REXLOG_DEBUG("Config: {} = {}", full_key, value_str);
       } else {
-        GetDeferredConfigStorage()[full_key] = value_str;
-        REXLOG_DEBUG("Config: deferring unknown cvar '{}'", full_key);
+        REXLOG_WARN("Config: invalid value for cvar '{}'", full_key);
       }
     }
   }
@@ -194,16 +211,25 @@ std::optional<size_t> RegisterFlag(FlagEntry entry) {
   index[entry.name] = pos;
   storage.push_back(std::move(entry));
 
-  auto& deferred = GetDeferredConfigStorage();
-  auto deferred_it = deferred.find(storage[pos].name);
-  if (deferred_it != deferred.end()) {
-    std::string name = deferred_it->first;
-    std::string value = deferred_it->second;
-    if (SetFlagByName(name, value)) {
-      deferred.erase(deferred_it);
-      REXLOG_DEBUG("Config: applied deferred cvar {} = {}", name, value);
-    } else {
-      REXLOG_WARN("Config: failed to apply deferred cvar '{}'", name);
+  // Late registration (runtime-loaded module): apply values that arrived
+  // before this flag existed, in the same order the startup sequence applies
+  // them to static cvars: command line, then environment, then config file.
+  if (g_init_done) {
+    FlagEntry& stored = storage[pos];
+    auto& pending = GetPendingValuesStorage();
+    auto pending_it = pending.find(stored.name);
+    if (pending_it != pending.end() && pending_it->second.cmdline) {
+      stored.setter(*pending_it->second.cmdline);
+    }
+    auto env_value = rex::platform::env::get(FlagNameToEnvVar(stored.name));
+    if (env_value.has_value()) {
+      stored.setter(*env_value);
+    }
+    if (pending_it != pending.end()) {
+      if (pending_it->second.config) {
+        stored.setter(*pending_it->second.config);
+      }
+      pending.erase(pending_it);
     }
   }
   return pos;
@@ -508,7 +534,34 @@ std::vector<std::string> Init(int argc, char** argv) {
     fprintf(stderr, "cvar: CLI11  parse error: %s\n", e.what());
   }
 
-  return app.remaining();
+  // Stash unrecognized --options for cvars that register later (plugins,
+  // guest DLL modules). Supported forms: --name=value, --name (bool true),
+  // --no-name (bool false). A separated "--name value" pair is ambiguous
+  // with a positional argument, so the value token is never consumed.
+  std::vector<std::string> positional;
+  for (const auto& arg : app.remaining()) {
+    std::string_view view(arg);
+    if (!view.starts_with("--")) {
+      positional.push_back(arg);
+      continue;
+    }
+    view.remove_prefix(2);
+    std::string name;
+    std::string value = "true";
+    if (auto eq = view.find('='); eq != std::string_view::npos) {
+      name.assign(view.substr(0, eq));
+      value.assign(view.substr(eq + 1));
+    } else if (view.starts_with("no-")) {
+      name.assign(view.substr(3));
+      value = "false";
+    } else {
+      name.assign(view);
+    }
+    std::lock_guard lock(GetRegistryMutex());
+    GetPendingValuesStorage()[name].cmdline = std::move(value);
+  }
+  g_init_done = true;
+  return positional;
 }
 
 void LoadConfig(const std::filesystem::path& config_path) {
@@ -549,10 +602,6 @@ void ApplyEnvironment() {
 void FinalizeInit() {
   std::lock_guard lock(g_mutex);
   g_finalized = true;
-  for (const auto& [name, value] : GetDeferredConfigStorage()) {
-    (void)value;
-    REXLOG_WARN("Config: unknown cvar '{}'", name);
-  }
   REXLOG_DEBUG("cvar: initialization finalized");
 }
 
@@ -594,7 +643,6 @@ ScopedLifecycleOverride::~ScopedLifecycleOverride() {
 void ResetAllForTesting() {
   ResetAllToDefaults();
   ClearPendingRestartFlags();
-  GetDeferredConfigStorage().clear();
   g_finalized = false;
 }
 
