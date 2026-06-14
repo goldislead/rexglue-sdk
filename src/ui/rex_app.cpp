@@ -70,10 +70,11 @@ std::unique_ptr<ui::ImGuiDialog> ReXApp::CreateAchievementsOverlay() {
 }
 
 std::unique_ptr<ui::AchievementNotificationDialog> ReXApp::CreateAchievementNotificationDialog() {
-  if (!imgui_drawer_) {
+  if (!imgui_drawer_ || !immediate_drawer_ || !runtime_) {
     return nullptr;
   }
-  return std::make_unique<ui::AchievementToastDialog>(imgui_drawer_.get());
+  return std::make_unique<ui::AchievementToastDialog>(imgui_drawer_.get(), immediate_drawer_.get(),
+                                                      runtime_.get());
 }
 
 system::AchievementManager& ReXApp::achievements() const {
@@ -385,9 +386,6 @@ bool ReXApp::SetupPresentation() {
           }
         });
 
-        // Achievement toast — created once, invisible until an unlock fires.
-        achievement_notification_ = CreateAchievementNotificationDialog();
-
         OnCreateDialogs(imgui_drawer_.get());
       }
     }
@@ -402,6 +400,9 @@ void ReXApp::LaunchModule() {
     // Register the achievement notification callback now that the runtime and
     // KernelState are guaranteed to exist. Done here (not OnCreateDialogs)
     // because KernelState is null during SetupPresentation.
+    if (!achievement_notification_) {
+      achievement_notification_ = CreateAchievementNotificationDialog();
+    }
     if (achievement_notification_ && achievement_notification_listener_ == 0 && runtime_ &&
         runtime_->kernel_state()) {
       auto* notification = achievement_notification_.get();

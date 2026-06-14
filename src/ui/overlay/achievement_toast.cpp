@@ -12,10 +12,14 @@
 #include <rex/ui/overlay/achievement_toast.h>
 #include <imgui.h>
 
+#include <rex/ui/immediate_drawer.h>
+
 namespace rex::ui {
 
-AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer)
-    : AchievementNotificationDialog(drawer) {}
+AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer,
+                                               ImmediateDrawer* immediate_drawer,
+                                               rex::Runtime* runtime)
+    : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {}
 
 AchievementToastDialog::~AchievementToastDialog() {}
 
@@ -56,7 +60,7 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
   alpha = std::max(0.0f, std::min(1.0f, alpha));
 
   const float pad = 16.0f;
-  const float w = 280.0f;
+  const float w = 320.0f;
   ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - w - pad, io.DisplaySize.y - 80.0f - pad),
                           ImGuiCond_Always);
   ImGui::SetNextWindowSize(ImVec2(w, 70.0f), ImGuiCond_Always);
@@ -68,12 +72,21 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
   ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, alpha));
   if (ImGui::Begin("##ach_toast", nullptr, flags)) {
+    constexpr float kIconSize = 44.0f;
+    ImmediateTexture* icon = icon_cache_.GetIcon(toast.event.achievement);
+    if (icon) {
+      ImGui::Image(reinterpret_cast<ImTextureID>(icon), ImVec2(kIconSize, kIconSize));
+      ImGui::SameLine();
+    }
+
+    ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, alpha));
     ImGui::TextUnformatted("Achievement Unlocked");
     ImGui::PopStyleColor();
     ImGui::TextUnformatted(toast.event.achievement.label.c_str());
     ImGui::SameLine();
     ImGui::TextDisabled(" (%dG)", static_cast<int>(toast.event.achievement.gamerscore));
+    ImGui::EndGroup();
   }
   ImGui::End();
   ImGui::PopStyleColor();

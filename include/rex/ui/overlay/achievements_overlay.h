@@ -11,12 +11,9 @@
  */
 #pragma once
 
-#include <memory>
-#include <string>
-#include <unordered_map>
-
 #include <rex/system/achievement_manager.h>
 #include <rex/ui/imgui_dialog.h>
+#include <rex/ui/overlay/achievement_icon_cache.h>
 
 namespace rex {
 class Runtime;
@@ -40,12 +37,8 @@ class AchievementsOverlayDialog : public ImGuiDialog {
   // Lazily loads icon_path, or icons/<image_id>.png when icon_path is empty.
   ImmediateTexture* GetIcon(const rex::system::AchievementInfo& achievement);
 
-  ImmediateDrawer* immediate_drawer_ = nullptr;
-  rex::Runtime* runtime_ = nullptr;
   rex::system::AchievementManager* achievements_ = nullptr;
-
-  // Relative metadata path -> texture (nullptr entry = tried and failed).
-  std::unordered_map<std::string, std::unique_ptr<ImmediateTexture>> icon_cache_;
+  AchievementIconCache icon_cache_;
 };
 
 }  // namespace rex::ui

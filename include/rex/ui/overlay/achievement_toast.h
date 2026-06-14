@@ -16,12 +16,20 @@
 #include <deque>
 #include <mutex>
 #include <rex/ui/overlay/achievement_notification.h>
+#include <rex/ui/overlay/achievement_icon_cache.h>
+
+namespace rex {
+class Runtime;
+}  // namespace rex
 
 namespace rex::ui {
 
+class ImmediateDrawer;
+
 class AchievementToastDialog : public AchievementNotificationDialog {
  public:
-  explicit AchievementToastDialog(ImGuiDrawer* drawer);
+  AchievementToastDialog(ImGuiDrawer* drawer, ImmediateDrawer* immediate_drawer,
+                         rex::Runtime* runtime);
   ~AchievementToastDialog() override;
 
   // Thread-safe: safe to call from any thread, including guest threads.
@@ -40,6 +48,7 @@ class AchievementToastDialog : public AchievementNotificationDialog {
 
   std::mutex mutex_;
   std::deque<PendingToast> queue_;
+  AchievementIconCache icon_cache_;
 };
 
 }  // namespace rex::ui

@@ -19,6 +19,7 @@ set(REXUI_CORE_SOURCES
 
 # Optional overlay dialogs
 set(REXUI_OVERLAY_SOURCES
+    overlay/achievement_icon_cache.cpp
     overlay/achievement_toast.cpp
     overlay/achievements_overlay.cpp
     overlay/debug_overlay.cpp
@@ -163,5 +164,4 @@ if(REXGLUE_USE_D3D12)
         dxc-headers
     )
 endif()
-
 

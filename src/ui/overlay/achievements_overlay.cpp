@@ -11,14 +11,9 @@
  */
 #include <rex/ui/overlay/achievements_overlay.h>
 
-#include <cstdio>
-#include <fstream>
-#include <vector>
-
 #include <imgui.h>
 
 #include <rex/runtime.h>
-#include <rex/ui/image_decode.h>
 #include <rex/ui/immediate_drawer.h>
 
 namespace rex::ui {
@@ -28,9 +23,8 @@ AchievementsOverlayDialog::AchievementsOverlayDialog(ImGuiDrawer* imgui_drawer,
                                                      rex::Runtime* runtime,
                                                      rex::system::AchievementManager* achievements)
     : ImGuiDialog(imgui_drawer),
-      immediate_drawer_(immediate_drawer),
-      runtime_(runtime),
-      achievements_(achievements) {}
+      achievements_(achievements),
+      icon_cache_(immediate_drawer, runtime) {}
 
 AchievementsOverlayDialog::~AchievementsOverlayDialog() {}
 
@@ -48,43 +42,7 @@ constexpr float kIconSize = 44.0f;
 
 ImmediateTexture* AchievementsOverlayDialog::GetIcon(
     const rex::system::AchievementInfo& achievement) {
-  std::filesystem::path relative_path =
-      achievement.icon_path.empty()
-          ? std::filesystem::path("icons") / (std::to_string(achievement.image_id) + ".png")
-          : std::filesystem::path(achievement.icon_path);
-  std::string cache_key = relative_path.generic_string();
-  auto it = icon_cache_.find(cache_key);
-  if (it != icon_cache_.end()) {
-    return it->second.get();  // may be nullptr (cached failure)
-  }
-
-  // First request for this metadata path: attempt to load, decode, and upload.
-  std::unique_ptr<ImmediateTexture> texture;  // null until successful
-  if (immediate_drawer_ && runtime_) {
-    auto path = runtime_->FindMetadataPath(relative_path);
-    std::error_code ec;
-    if (path && std::filesystem::exists(*path, ec)) {
-      std::ifstream f(*path, std::ios::binary | std::ios::ate);
-      if (f) {
-        std::streamsize len = f.tellg();
-        f.seekg(0);
-        std::vector<uint8_t> bytes(static_cast<size_t>(len));
-        if (len > 0 && f.read(reinterpret_cast<char*>(bytes.data()), len)) {
-          int w = 0, h = 0;
-          std::vector<uint8_t> rgba = DecodeImageRGBA(bytes.data(), bytes.size(), w, h);
-          if (!rgba.empty() && w > 0 && h > 0) {
-            texture = immediate_drawer_->CreateTexture(
-                static_cast<uint32_t>(w), static_cast<uint32_t>(h), ImmediateTextureFilter::kLinear,
-                false, rgba.data());
-          }
-        }
-      }
-    }
-  }
-
-  ImmediateTexture* raw = texture.get();
-  icon_cache_.emplace(std::move(cache_key), std::move(texture));
-  return raw;
+  return icon_cache_.GetIcon(achievement);
 }
 
 void AchievementsOverlayDialog::OnDraw(ImGuiIO& io) {
