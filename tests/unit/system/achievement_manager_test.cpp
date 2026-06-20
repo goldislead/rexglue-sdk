@@ -15,6 +15,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <rex/runtime.h>
+#include <rex/embedded_metadata.h>
 #include <rex/system/achievement_manager.h>
 
 namespace {
@@ -179,4 +180,19 @@ TEST_CASE("runtime metadata root overrides legacy metadata discovery", "[achieve
     CHECK(*runtime.FindMetadataPath("achievements.toml") == explicit_metadata);
     CHECK_FALSE(runtime.FindMetadataPath("missing.toml"));
   }
+}
+
+TEST_CASE("embedded metadata assets resolve by metadata-relative path", "[achievements]") {
+  static constexpr std::uint8_t kIconBytes[] = {0x89, 0x50, 0x4E, 0x47};
+  REQUIRE(rex::RegisterEmbeddedMetadataAsset("icons/custom/unit-test.png", kIconBytes,
+                                             sizeof(kIconBytes)));
+
+  auto asset =
+      rex::FindEmbeddedMetadataAsset(std::filesystem::path("icons") / "custom" / "unit-test.png");
+  REQUIRE(asset);
+  REQUIRE(asset->bytes.size() == sizeof(kIconBytes));
+  CHECK(asset->bytes[0] == 0x89);
+  CHECK(asset->bytes[1] == 0x50);
+  CHECK(asset->bytes[2] == 0x4E);
+  CHECK(asset->bytes[3] == 0x47);
 }

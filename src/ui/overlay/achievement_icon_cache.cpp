@@ -77,26 +77,25 @@ std::unique_ptr<ImmediateTexture> AchievementIconCache::LoadMetadataTexture(
 
   auto path = runtime_->FindMetadataPath(relative_path);
   std::error_code ec;
-  if (!path || !std::filesystem::exists(*path, ec)) {
-    return nullptr;
+  if (path && std::filesystem::exists(*path, ec)) {
+    std::ifstream file(*path, std::ios::binary | std::ios::ate);
+    if (file) {
+      std::streamsize length = file.tellg();
+      if (length > 0) {
+        file.seekg(0);
+
+        std::vector<uint8_t> bytes(static_cast<size_t>(length));
+        if (file.read(reinterpret_cast<char*>(bytes.data()), length)) {
+          return CreateTextureFromBytes(bytes.data(), bytes.size());
+        }
+      }
+    }
   }
 
-  std::ifstream file(*path, std::ios::binary | std::ios::ate);
-  if (!file) {
-    return nullptr;
+  if (auto embedded = runtime_->FindEmbeddedMetadata(relative_path)) {
+    return CreateTextureFromBytes(embedded->bytes.data(), embedded->bytes.size());
   }
-
-  std::streamsize length = file.tellg();
-  if (length <= 0) {
-    return nullptr;
-  }
-  file.seekg(0);
-
-  std::vector<uint8_t> bytes(static_cast<size_t>(length));
-  if (!file.read(reinterpret_cast<char*>(bytes.data()), length)) {
-    return nullptr;
-  }
-  return CreateTextureFromBytes(bytes.data(), bytes.size());
+  return nullptr;
 }
 
 std::unique_ptr<ImmediateTexture> AchievementIconCache::LoadXdbfTexture(uint32_t image_id) {
