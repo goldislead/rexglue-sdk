@@ -44,13 +44,20 @@ struct PathConfig {
   std::filesystem::path user_data_root;
   std::filesystem::path update_data_root;
   std::filesystem::path cache_root;
+  std::filesystem::path metadata_root;
   std::filesystem::path config_path;
 };
 
 namespace ui {
 class ConsoleDialog;
 class SettingsDialog;
+class AchievementNotificationDialog;
 }  // namespace ui
+
+namespace system {
+class AchievementManager;
+}  // namespace system
+ 
 
 /// Base class for recompiled Xbox 360 applications.
 ///
@@ -179,6 +186,14 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   /// no overlay (SDK presenter mode; this hook is never reached).
   virtual std::unique_ptr<ui::ImmediateDrawer> OnCreateImmediateDrawer() { return nullptr; }
 
+  /// Creates the overlay toggled by bind_achievements. Override to replace the
+  /// built-in achievement UI. Returning nullptr disables the overlay.
+  virtual std::unique_ptr<ui::ImGuiDialog> CreateAchievementsOverlay();
+
+  /// Creates the achievement notification UI. Override to replace the
+  /// built-in toast renderer. Returning nullptr disables notifications.
+  virtual std::unique_ptr<ui::AchievementNotificationDialog> CreateAchievementNotificationDialog();
+
   // --- Window event hooks (delivered on the UI thread) ---
 
   /// Logical (DPI-independent) client size changed.
@@ -237,6 +252,9 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   const std::filesystem::path& user_data_root() const { return user_data_root_; }
   const std::filesystem::path& update_data_root() const { return update_data_root_; }
   const std::filesystem::path& cache_root() const { return cache_root_; }
+  const std::filesystem::path& metadata_root() const { return metadata_root_; }
+
+  system::AchievementManager& achievements() const;
 
   /// Set a callback that provides guest frame stats to the debug overlay.
   void SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider);
@@ -273,6 +291,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   std::filesystem::path user_data_root_;
   std::filesystem::path update_data_root_;
   std::filesystem::path cache_root_;
+  std::filesystem::path metadata_root_;
   std::unique_ptr<Runtime> runtime_;
   std::unique_ptr<ui::Window> window_;
   std::thread module_thread_;
@@ -285,6 +304,9 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   std::unique_ptr<ui::DebugOverlayDialog> debug_overlay_;
   std::unique_ptr<ui::ConsoleDialog> console_overlay_;
   std::unique_ptr<ui::SettingsDialog> settings_overlay_;
+  std::unique_ptr<ui::ImGuiDialog> achievements_overlay_;
+  std::unique_ptr<ui::AchievementNotificationDialog> achievement_notification_;
+  uint64_t achievement_notification_listener_ = 0;
   ui::DebugOverlayDialog::FrameStatsProvider frame_stats_provider_;
   std::filesystem::path config_path_;
 };
