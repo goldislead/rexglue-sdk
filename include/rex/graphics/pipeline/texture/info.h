@@ -126,6 +126,8 @@ struct FormatInfo {
   uint32_t block_width;
   uint32_t block_height;
   uint32_t bits_per_pixel;
+  uint8_t component_bits[4];
+  bool fixed;
 
   uint32_t bytes_per_block() const { return block_width * block_height * bits_per_pixel / 8; }
 

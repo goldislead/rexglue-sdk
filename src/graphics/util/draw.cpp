@@ -31,6 +31,13 @@ REXCVAR_DEFINE_BOOL(half_pixel_offset, true, "GPU", "Enable half pixel offset");
 REXCVAR_DEFINE_BOOL(resolve_resolution_scale_fill_half_pixel_offset, true, "GPU",
                     "Fill half pixel offset during resolution scale resolve");
 
+REXCVAR_DEFINE_BOOL(resolve_check_number_format, false, "GPU",
+                    "Require the destination number format to match before using fast color "
+                    "resolves");
+
+REXCVAR_DEFINE_BOOL(gamma_decode_pwl_resolve, true, "GPU",
+                    "Decode 8_8_8_8_GAMMA MSAA color resolves to linear before averaging");
+
 // Very prominent in 545407F2.
 // DEFINE_bool(
 //     resolve_resolution_scale_fill_half_pixel_offset, true,
@@ -1066,6 +1073,7 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
     color_edram_info.format = uint32_t(color_info.color_format);
     color_edram_info.format_is_64bpp = is_64bpp;
     color_edram_info.fill_half_pixel_offset = uint32_t(fill_half_pixel_offset);
+    color_edram_info.decode_pwl_gamma = REXCVAR_GET(gamma_decode_pwl_resolve) ? 1u : 0u;
     if ((fixed_rg16_truncated_to_minus_1_to_1 &&
          color_info.color_format == xenos::ColorRenderTargetFormat::k_16_16) ||
         (fixed_rgba16_truncated_to_minus_1_to_1 &&
@@ -1111,6 +1119,21 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
   return true;
 }
 
+static constexpr bool ColorResolveNumberFormatMatches(
+    xenos::ColorFormat color_format, xenos::SurfaceNumberFormat num_format) {
+  switch (color_format) {
+    case xenos::ColorFormat::k_16_FLOAT:
+    case xenos::ColorFormat::k_16_16_FLOAT:
+    case xenos::ColorFormat::k_16_16_16_16_FLOAT:
+    case xenos::ColorFormat::k_32_FLOAT:
+    case xenos::ColorFormat::k_32_32_FLOAT:
+    case xenos::ColorFormat::k_32_32_32_32_FLOAT:
+      return num_format == xenos::SurfaceNumberFormat::kFloat;
+    default:
+      return num_format == xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction;
+  }
+}
+
 ResolveCopyShaderIndex ResolveInfo::GetCopyShader(uint32_t draw_resolution_scale_x,
                                                   uint32_t draw_resolution_scale_y,
                                                   ResolveCopyShaderConstants& constants_out,
@@ -1125,7 +1148,10 @@ ResolveCopyShaderIndex ResolveInfo::GetCopyShader(uint32_t draw_resolution_scale
        xenos::IsSingleCopySampleSelected(copy_dest_coordinate_info.copy_sample_select) &&
        xenos::IsColorResolveFormatBitwiseEquivalent(
            xenos::ColorRenderTargetFormat(color_edram_info.format),
-           xenos::ColorFormat(copy_dest_info.copy_dest_format)))) {
+           xenos::ColorFormat(copy_dest_info.copy_dest_format)) &&
+       (!REXCVAR_GET(resolve_check_number_format) ||
+        ColorResolveNumberFormatMatches(xenos::ColorFormat(copy_dest_info.copy_dest_format),
+                                        copy_dest_info.copy_dest_number)))) {
     if (edram_info.msaa_samples >= xenos::MsaaSamples::k4X) {
       shader = source_is_64bpp ? ResolveCopyShaderIndex::kFast64bpp4xMSAA
                                : ResolveCopyShaderIndex::kFast32bpp4xMSAA;
